@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv
+venv/
+
+# Secrets and local state (never commit)
+config.json
+buffer/
+models/
+
+# Logs
+*.log
+
+# OS
+.DS_Store

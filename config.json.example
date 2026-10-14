@@ -1,0 +1,47 @@
+{
+  "buffer": {
+    "cap_bytes": 1073741824,
+    "dir": "buffer",
+    "jpeg_quality": 85,
+    "max_files": 5000
+  },
+  "cameras": [
+    {
+      "confidence_threshold": 0.5,
+      "heartbeat_interval": 600,
+      "id": "camera0",
+      "imgsz": 640,
+      "model": "yolov8n",
+      "name": "Pi Camera",
+      "publish": {
+        "classId": true,
+        "className": true,
+        "events": true
+      },
+      "resolution": [
+        1280,
+        720
+      ],
+      "sample_interval": 5.0,
+      "type": "picamera",
+      "watchlist": [
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "dog",
+        "cat",
+        "bicycle",
+        "motorcycle"
+      ]
+    }
+  ],
+  "mqtt": {
+    "host": "YOUR-HIVEMQ-HOST.hivemq.cloud",
+    "password": "YOUR-PASSWORD",
+    "port": 8883,
+    "tls": true,
+    "topic_root": "Wovyn/RaspberryPi/YOLOSensor",
+    "username": "YOUR-USERNAME"
+  }
+}

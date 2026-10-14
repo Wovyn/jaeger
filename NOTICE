@@ -1,0 +1,20 @@
+muse-pi-yolo-mqtt
+Copyright 2026 Wovyn, LLC
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project uses the following third-party software (all installed from
+their official distributions; no vendored copies):
+
+- Ultralytics YOLOv8 (AGPL-3.0) — https://github.com/ultralytics/ultralytics
+  Object-detection models and inference runtime (yolov8n.pt, yolov8s.pt).
+- PyTorch (BSD-style) — https://pytorch.org/
+  CPU-only build from https://download.pytorch.org/whl/cpu.
+- torchvision (BSD-style) — CPU-only build, matching the +cpu torch.
+- OpenCV / opencv-python (Apache 2.0) — https://opencv.org/
+  Frame handling and JPEG encoding.
+- paho-mqtt (Eclipse Public License 2.0 / Eclipse Distribution License 1.0)
+  https://eclipse.dev/paho/ — MQTT client.
+- Picamera2 (BSD 2-Clause) — https://github.com/raspberrypi/picamera2
+  Raspberry Pi camera access (Debian distro package python3-picamera2).
+- NumPy (BSD-3-Clause) — https://numpy.org/

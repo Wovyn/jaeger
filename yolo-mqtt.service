@@ -1,0 +1,15 @@
+[Unit]
+Description=Muse Pi YOLO MQTT sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=musecell
+WorkingDirectory=/home/musecell/projects/muse-pi-yolo-mqtt
+ExecStart=/home/musecell/projects/muse-pi-yolo-mqtt/venv/bin/python yolo_sensor.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
