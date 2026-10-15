@@ -10,12 +10,11 @@ Wovyn R&D project. Apache 2.0.
 
 ## Status
 
-v0.1.0 implemented and tested Oct 13, 2026 (single Pi Camera; see DESIGN.md for
-the plan, including the multi-camera/RTSP backlog). Service code, MQTT wiring,
-and the systemd unit are done and verified against the live HiveMQ Cloud broker:
-full topic tree publishes, per-class change detection, config/set commands,
-image request/response, graceful shutdown. Awaiting Scott's go-ahead to commit
-and to enable the systemd unit.
+v0.1.0 implemented, tested, and pushed Oct 14, 2026 (single Pi Camera).
+v0.2.0 (Jaeger web UI) built and committed Oct 14, 2026, running live: web UI on port 8082,
+per-image JSON metadata sidecars, confirm-2 change debounce, and Picamera2
+camera controls (see DESIGN.md §13). Live testing in progress; feedback may fold into follow-up commits. The systemd unit is written but not
+enabled. See DESIGN.md for the plan, including the multi-camera/RTSP backlog.
 
 ## Hardware
 
@@ -179,10 +178,11 @@ cd ~/projects/muse-pi-yolo-mqtt
 ```
 
 `config.json` layout: `mqtt` (host/port/username/password/tls/topic_root),
-`cameras` (list; v0.1 has one `camera0` entry — id, name, type, resolution,
+`cameras` (list; v0.2 has one `camera0` entry — id, name, type, resolution,
 sample_interval, model, imgsz, confidence_threshold, watchlist, publish
-toggles, heartbeat_interval), `buffer` (dir, cap_bytes, max_files,
-jpeg_quality). See `config.json.example` for the full schema.
+toggles, heartbeat_interval, camera_controls), `buffer` (dir, cap_bytes,
+max_files, jpeg_quality), `web` (enabled, host, port — default 0.0.0.0:8082).
+See `config.json.example` for the full schema.
 
 ### Run in the foreground (test)
 
@@ -219,6 +219,8 @@ Publish JSON to `.../camera0/config/set` — e.g. via Node-RED or mosquitto_pub:
 | `buffer_cap_mb` | ring-buffer cap in MB |
 | `heartbeat_interval` | seconds between config republishes |
 | `publish` | `{"classId": bool, "className": bool, "events": bool}` |
+| `camera_controls` | `{"exposure_value": float, "ae_exposure_mode": "Short"/"Normal"/"Long", "exposure_time": µs int, "analogue_gain": float, "ae_enable": bool, "awb_enable": bool}` — see §11 |
+| `imgsz` | YOLO input size (e.g. 640, 416) |
 | `capture_now` | `true` triggers an immediate capture cycle |
 
 Changes persist back to `config.json` (mode 0600 preserved) and the camera's
@@ -254,8 +256,14 @@ All payloads JSON, timestamps ISO-8601 UTC, QoS 1.
 
 Detection detail: `{confidence, bbox}` with bbox normalized 0–1 `[x1,y1,x2,y2]`.
 A class publishes only when its count changes (including → 0, which clears the
-retained state). The ring buffer (`buffer/camera0/`) stores the frame for every
-published change; `image_ref` is the buffer event id.
+retained state). In v0.2.0 a change must also persist for 2 consecutive
+inference cycles (confirm-2 debounce) before it publishes — a one-cycle
+flicker around the threshold is swallowed. The ring buffer
+(`buffer/camera0/`) stores the frame for every published change; `image_ref`
+is the buffer event id. Every stored frame has a `<event_id>.json` sidecar
+with the full metadata (camera, timestamp, full counts, detections incl.
+bboxes, model, threshold); `images/response` reads detections from the
+sidecar, so they survive a restart.
 
 ## 7. Node-RED
 
@@ -277,12 +285,14 @@ muse-pi-yolo-mqtt/
 ├── NOTICE                third-party attributions
 ├── LICENSE               Apache 2.0
 ├── yolo_sensor.py        the service
+├── web_ui.py             Jaeger web UI server (port 8082, stdlib only)
+├── static/               web UI files (index.html, app.js, style.css)
 ├── setup_config.py       generates config.json from ~/Documents/HiveMQ.txt
 ├── config.json.example   config schema (no secrets)
 ├── yolo-mqtt.service     systemd unit
 ├── venv/                 python environment (not in git)
 ├── models/               yolov8n.pt, yolov8s.pt (not in git)
-├── buffer/               per-camera ring-buffer JPEGs (not in git)
+├── buffer/               per-camera ring-buffer JPEGs + JSON sidecars (not in git)
 └── setup*.log            install logs (not in git)
 ```
 
@@ -297,6 +307,64 @@ muse-pi-yolo-mqtt/
 | `import picamera2` fails in venv | venv needs `--system-site-packages` to see the apt package |
 | service exits: `missing config.json` | run `setup_config.py` first |
 | `AttributeError: 'NoneType' ... publish` (old) | fixed Oct 13: startup baselines now publish from `on_connect` |
+
+## 10. Web UI (Jaeger, v0.2.0)
+
+Open `http://<pi-ip>:8082` in a browser (no login — LAN-only by design;
+see DESIGN.md §13 for the no-auth decision).
+
+- Header: Jaeger + version, MQTT status dot, hamburger menu (Settings,
+  About, buffer usage).
+- Left: cameras list (click a camera to select it) and the counts panel
+  for the selected camera. Counts rows are `name: count`, aligned;
+  the show-zero toggle hides zero counts; clicking a row filters the
+  events list to that class. Below: the latest-frame strip, showing
+  the most recent capture even when nothing was detected.
+- Right: events list, newest first, last 25 with infinite scroll for
+  older events. Each row shows camera, local time (UTC on mouseover),
+  objects + counts, and a thumbnail. Click a row for the full-size
+  image in a modal; the bounding-box overlay toggle (default on) draws
+  boxes from the sidecar metadata. Esc closes the modal; arrow keys
+  step through events.
+- Settings (hamburger menu) exposes every tunable: sample interval,
+  confidence threshold, watchlist (COCO checkboxes), model, imgsz,
+  buffer cap, heartbeat, publish toggles, camera controls. UI config
+  writes go through the same apply + persist path as MQTT `config/set`.
+
+API (same server, JSON unless noted):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/status` | version, MQTT state, uptime, last inference, buffer usage |
+| `GET /api/cameras` | per-camera config + buffer stats |
+| `GET /api/counts?camera=` | current counts for a camera |
+| `GET /api/classes?camera=` | COCO class names + watchlist |
+| `GET /api/events?camera=&class=&limit=&before=` | paged events (newest first) |
+| `GET /api/image?camera=&event=` | event JPEG bytes |
+| `GET /api/latest?camera=` | latest frame as base64 JPEG + counts |
+| `GET /api/config?camera=` | camera config |
+| `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set` |
+| `POST /api/capture_now` | `{camera_id}` — trigger an immediate cycle |
+
+## 11. Camera controls (Picamera2)
+
+Configured per camera under `camera_controls` (in `config.json`, via MQTT
+`config/set`, or via Settings). AEC/AGC stay on by default.
+
+| Key | Effect |
+|---|---|
+| `exposure_value` | EV compensation in stops, clamped to −8…8 (positive = brighter) |
+| `ae_exposure_mode` | `Short` (less blur, more noise), `Normal`, `Long` (less noise, more blur) |
+| `exposure_time` | Manual exposure in microseconds; setting it (or `analogue_gain`) turns AEC off |
+| `analogue_gain` | Manual sensor gain, clamped to 1.0…16.0 |
+| `ae_enable` | Auto exposure on/off |
+| `awb_enable` | Auto white balance on/off |
+
+Out-of-range values are clamped, unknown keys are logged and ignored, and
+a bad value never crashes the capture loop — previous settings are kept.
+Note: `Brightness`, `Contrast`, `Saturation`, `Sharpness`,
+`AeMeteringMode`, `NoiseReductionMode`, and HDR are NOT Picamera2 controls
+in this context; do not assume they exist.
 
 ## License
 

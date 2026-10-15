@@ -1,0 +1,78 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f4; color: #111; }
+header { display: flex; align-items: center; gap: 0.6em; padding: 0.5em 1em;
+  background: #1d2733; color: #fff; position: sticky; top: 0; z-index: 10; }
+header h1 { font-size: 1.4em; margin: 0; flex: 1; }
+header h1 span { font-size: 0.6em; font-weight: normal; color: #9fb3c8; }
+.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.dot.online { background: #3c3; }
+.dot.offline { background: #c33; }
+#statusText { font-size: 0.85em; color: #cbd6e2; }
+#menuBtn { font-size: 1.4em; background: none; border: none; color: #fff; cursor: pointer; }
+#menu { position: absolute; right: 0.5em; top: 3em; background: #fff; color: #111;
+  border: 1px solid #ccc; border-radius: 6px; padding: 0.5em; display: flex;
+  flex-direction: column; gap: 0.25em; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+#menu button { text-align: left; background: none; border: none; padding: 0.4em 0.6em;
+  cursor: pointer; font-size: 1em; }
+#menu button:hover { background: #eef2f7; }
+.menu-line { font-size: 0.85em; color: #555; padding: 0.4em 0.6em; }
+.hidden { display: none !important; }
+
+main { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; padding: 1em;
+  max-width: 1600px; margin: 0 auto; }
+section { background: #fff; border-radius: 8px; padding: 1em; margin-bottom: 1em; }
+section h2 { margin-top: 0; font-size: 1.15em; }
+ul, ol { list-style: none; padding: 0; margin: 0; }
+#cameraList li { padding: 0.5em; border: 1px solid #ddd; border-radius: 6px;
+  margin-bottom: 0.5em; cursor: pointer; }
+#cameraList li.selected { border-color: #2563eb; background: #eef4ff; }
+#cameraList .cam-meta { font-size: 0.85em; color: #555; }
+#addCameraBtn { font-size: 1.4em; color: #999; background: #eee; border: 1px dashed #bbb;
+  border-radius: 6px; padding: 0.1em 0.5em; cursor: not-allowed; }
+#countsList { display: grid; grid-template-columns: 1fr auto; gap: 0.15em 1em; }
+#countsList li { display: contents; }
+#countsList .count-row { display: contents; cursor: pointer; }
+#countsList .count-row:hover span { background: #eef4ff; }
+#countsList .count-name { text-align: left; }
+#countsList .count-value { text-align: right; font-variant-numeric: tabular-nums; }
+#latestImg { width: 100%; border-radius: 6px; background: #222; min-height: 120px; }
+#latestMeta { font-size: 0.85em; color: #555; margin-top: 0.4em; }
+.filters { display: flex; gap: 0.8em; align-items: center; flex-wrap: wrap; margin-bottom: 0.8em; }
+#eventsList li { display: flex; gap: 0.8em; padding: 0.6em; border: 1px solid #ddd;
+  border-radius: 6px; margin-bottom: 0.6em; cursor: pointer; }
+#eventsList li:hover { background: #f7faff; }
+#eventsList .event-info { flex: 1; min-width: 0; }
+#eventsList .event-time { font-size: 0.85em; color: #555; }
+#eventsList .event-objs { font-size: 0.9em; }
+#eventsList img { width: 160px; height: auto; border-radius: 4px; background: #222;
+  align-self: flex-start; }
+#eventsEnd { text-align: center; color: #777; padding: 1em; }
+
+/* Modals */
+#modal, #settingsModal, #aboutModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal-box { background: #fff; border-radius: 8px; padding: 1.2em; max-width: 92vw;
+  max-height: 92vh; overflow: auto; position: relative; }
+#modalClose, #settingsClose, #aboutClose { position: absolute; top: 0.4em; right: 0.6em;
+  font-size: 1.4em; background: none; border: none; cursor: pointer; }
+.modal-img-wrap { position: relative; line-height: 0; }
+#modalImg { max-width: 86vw; max-height: 72vh; display: block; }
+#modalSvg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#modalSvg rect { fill: none; stroke: #ff3333; stroke-width: 0.004; }
+#modalSvg text { fill: #ff3333; font-size: 0.018px; paint-order: stroke;
+  stroke: #fff; stroke-width: 0.002px; }
+.modal-controls { display: flex; gap: 1em; align-items: center; justify-content: center;
+  margin-top: 0.6em; }
+#modalCaption { text-align: center; font-size: 0.9em; color: #444; margin-top: 0.4em; }
+#settingsForm label { display: block; margin: 0.6em 0; }
+#settingsForm input[type="number"], #settingsForm select { width: 100%; padding: 0.3em; }
+.checkbox-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.2em 0.8em; }
+.checkbox-grid label { margin: 0; font-size: 0.9em; }
+.hint { font-size: 0.85em; color: #555; }
+.error { color: #c00; min-height: 1.2em; }
+
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  #eventsList img { width: 110px; }
+  .checkbox-grid { grid-template-columns: repeat(2, 1fr); }
+}

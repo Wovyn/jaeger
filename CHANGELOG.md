@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.0] - 2026-10-14
+
+### Added
+- Web UI on port 8082 (`web_ui.py` + `static/`, stdlib only, no auth —
+  LAN-only by decision): header with Jaeger + version, MQTT status dot,
+  and hamburger menu (Settings, About, buffer usage); left column with
+  cameras list (click to select) + counts panel for the selected camera
+  (aligned `name: count` rows, show-zero toggle, click a row to filter
+  events) + latest-frame strip; right column with the events list (last
+  25, infinite scroll, camera/class filters, thumbnails, full-size modal
+  with client-side SVG bounding-box overlay, Esc/arrows).
+- JSON API (`/api/status`, `/api/cameras`, `/api/counts`, `/api/classes`,
+  `/api/events`, `/api/image`, `/api/latest`, `/api/config`,
+  `/api/capture_now`). UI config writes go through the same apply +
+  persist path as MQTT `config/set` (main loop stays the single writer).
+- Per-image JSON sidecars: `<event_id>.json` next to each `<event_id>.jpg`
+  (camera, timestamp, full counts, detections incl. bboxes, model,
+  threshold). Eviction deletes `.jpg` + `.json` as a pair; orphan
+  sidecars are cleaned up; `images/response` reads detections from the
+  sidecar, so they survive a restart.
+- Confirm-2 debounce: a count change publishes/stores only after the same
+  value is observed in 2 consecutive inference cycles (kills 1-cycle
+  flicker around the threshold).
+- Picamera2 camera controls (per camera, via config / MQTT `config/set` /
+  Settings): `exposure_value`, `ae_exposure_mode` (Short/Normal/Long),
+  manual `exposure_time` + `analogue_gain` (imply AEC off), `ae_enable`,
+  `awb_enable`. Values validated/clamped; bad values logged, never fatal.
+- `camera_config_payload()` — one camera-config dict shared by MQTT
+  publish and the web API; payload now also carries `camera_controls`
+  and `last_capture_at`.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added

@@ -1,7 +1,6 @@
-# muse-pi-yolo-mqtt — Plan & Design (v0.1)
+# muse-pi-yolo-mqtt — Plan & Design (v0.1, v0.2.0)
 
-Status: DRAFT for Scott's review (Oct 12, 2026; topic tree revised Oct 13;
-multi-camera design Oct 13). Uncommitted.
+Status: v0.1.0 built and pushed Oct 14, 2026; v0.2.0 built and committed Oct 14, 2026, live testing in progress (topic tree revised Oct 13; multi-camera design Oct 13).
 
 ## 1. Overview
 
@@ -197,7 +196,7 @@ published class change occurs for that camera (no publish → no store).
   with the per-class counts from the summary (no per-class state needed).
 - Image on demand: publish `{event_id}` to `.../camera0/images/request`,
   read the JPEG from `.../camera0/images/response`.
-- Example flow documented in README (forthcoming, at implementation).
+- Example flow documented in README §7 (Node-RED).
 
 ## 10. Security
 
@@ -236,3 +235,23 @@ published class change occurs for that camera (no publish → no store).
 - Awaiting Scott: design sign-off → implementation (service code, config,
   systemd unit, README completion).
 - Pushover node setup in Node-RED (later step).
+
+## 13. v0.2.0 - Jaeger web UI (DECIDED Oct 14, 2026; built Oct 14, 2026, committed Oct 14, 2026; live testing in progress)
+
+- Project evolves to Jaeger (play on Frigate, a smaller version). Header shows Jaeger + version from one code constant. Repo/folder keep muse-pi-yolo-mqtt for now.
+- Web UI on port 8082. Embedded ThreadingHTTPServer thread in yolo_sensor.py (stdlib only, static HTML/JS/CSS). One config writer shared with the MQTT config/set path.
+- Layout: header (Jaeger + version, hamburger menu right). Left 50 percent: cameras list (selected camera) + counts panel for the selected camera. Right 50 percent: events list.
+- Cameras panel: name, type, resolution, status dot, last capture time. Greyed [+] add-camera placeholder, disabled, tooltip RTSP coming soon.
+- Counts panel: rows of name, count, counts aligned via CSS grid, toggle hides zero counts. Clicking a row filters events to that class. Counts follow the selected camera.
+- Events list: newest first, last 25 initial, infinite scroll for older. Each row: camera, local date/time (UTC on mouseover), objects + counts, thumbnail. Click opens full-size modal. Bbox overlay toggle default on (client-side SVG from sidecar bbox data). Esc closes modal, arrows step events.
+- Latest frame strip: most recent capture shown even with no detections.
+- Event filter by camera. Header status dot: MQTT connection + uptime + last inference duration.
+- No auth in v0.2.0 (LAN-only). Revisit as the project grows.
+- Settings (via hamburger menu): all tunables - sample interval, confidence threshold, watchlist (COCO 80 checkboxes), model, buffer cap, heartbeat, publish toggles, camera controls. Buffer cap editable in Settings; current buffer usage shown in menu.
+- Thumbnails: browser-scaled full JPEGs (no server thumbnail pipeline in v0.2.0).
+- Time display: browser local time; UTC on mouseover.
+- Sidecars: <event_id>.json next to each <event_id>.jpg. Fields: camera id, timestamp, full counts for watched classes, detections (class, confidence, bbox normalized 0-1), model, threshold. Eviction deletes jpg+json pair. Images/response reads detections from sidecar (survives restart). No backfill for pre-v0.2.0 JPGs.
+- Debounce: a change counts only after 2 consecutive inference cycles (confirm-2). Test data will tell if more is needed.
+- Camera controls (Muse experiments; Google AI Mode conversation Oct 14): Picamera2 AEC/AGC on by default. Expose ExposureValue (EV compensation), AeExposureMode (Short/Normal/Long), manual ExposureTime + AnalogueGain, and AeEnable/AwbEnable lock. Test AeExposureMode Long for dark-room noise/flap reduction. Brightness/Contrast/Saturation/Sharpness/AeMeteringMode/NoiseReductionMode/HDR were NOT in that conversation as Picamera2 controls; do not assume they exist.
+- Build order: sidecars + paired eviction; debounce; web thread + API; static UI; camera controls; docs. Commit as v0.2.0 on Scott go-ahead.
+- Oct 14 housekeeping: test buffer JPGs dropped (1953 files, 395 MB, all flap test data). v0.1.0 pushed by Scott Oct 14 (b237fce on origin/main, in sync).

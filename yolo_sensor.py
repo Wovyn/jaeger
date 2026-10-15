@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""muse-pi-yolo-mqtt service v0.1.0.
+"""Jaeger (muse-pi-yolo-mqtt) service v0.2.0.
 
 Captures frames from configured cameras, runs YOLOv8 object detection, and
 publishes per-class counts/details to MQTT only when the scene changes.
@@ -17,13 +17,19 @@ import os
 import queue
 import signal
 import sys
+import threading
 import time
 
 import cv2
 import paho.mqtt.client as mqtt
 from ultralytics import YOLO
 
-VERSION = "0.1.0"
+try:
+    from web_ui import JaegerWebServer
+except ImportError:  # web UI optional; the sensor must keep running
+    JaegerWebServer = None
+
+VERSION = "0.2.0"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "config.json")
 EVENT_REGISTRY_MAX = 200
@@ -40,6 +46,7 @@ class Camera:
         self.id = cfg["id"]
         self.name = cfg.get("name", self.id)
         self.cfg = cfg
+        self.last_metadata = {}
         w, h = cfg.get("resolution", [1280, 720])
         self.width, self.height = int(w), int(h)
 
@@ -48,6 +55,10 @@ class Camera:
 
     def close(self):
         pass
+
+    def apply_camera_controls(self, controls):
+        """Apply camera controls. Base: no-op; backends override."""
+        return {}
 
     @property
     def access_method(self):
@@ -66,10 +77,75 @@ class PiCamera(Camera):
         self._picam2.configure(still_cfg)
         self._picam2.start()
         time.sleep(2)  # let AEC/AGC settle
+        self.apply_camera_controls(cfg.get("camera_controls", {}))
 
     def capture(self):
         arr = self._picam2.capture_array()  # BGR888 -> BGR numpy array
+        try:
+            self.last_metadata = self._picam2.capture_metadata()
+        except Exception:
+            pass
         return arr, time.time()
+
+    def apply_camera_controls(self, controls):
+        """Apply validated Picamera2 controls. Never raises: bad values
+        are logged and ignored, previous settings kept. Returns the
+        input controls dict on success, {} if nothing was applied."""
+        if not isinstance(controls, dict) or not controls:
+            return {}
+        raw = {}
+        try:
+            if "exposure_value" in controls:
+                ev = float(controls["exposure_value"])
+                raw["ExposureValue"] = max(-8.0, min(8.0, ev))
+            if "ae_exposure_mode" in controls:
+                mode = str(controls["ae_exposure_mode"])
+                if mode in ("Short", "Normal", "Long"):
+                    try:
+                        from libcamera import controls as lc_controls
+                        raw["AeExposureMode"] = getattr(
+                            lc_controls.AeExposureModeEnum, mode)
+                    except Exception as e:
+                        print(f"camera controls: AeExposureMode {mode} "
+                              f"unavailable ({e}); skipping", flush=True)
+                else:
+                    print(f"camera controls: bad AeExposureMode {mode!r}; "
+                          "want Short/Normal/Long", flush=True)
+            manual = False
+            if "exposure_time" in controls:
+                et = int(controls["exposure_time"])
+                raw["ExposureTime"] = max(1, min(10000000, et))
+                manual = True
+            if "analogue_gain" in controls:
+                ag = float(controls["analogue_gain"])
+                raw["AnalogueGain"] = max(1.0, min(16.0, ag))
+                manual = True
+            if manual:
+                # Manual exposure/gain only take effect with AEC off.
+                raw["AeEnable"] = False
+            if "ae_enable" in controls:
+                raw["AeEnable"] = bool(controls["ae_enable"])
+            if "awb_enable" in controls:
+                raw["AwbEnable"] = bool(controls["awb_enable"])
+            unknown = sorted(set(controls) - {
+                "exposure_value", "ae_exposure_mode", "exposure_time",
+                "analogue_gain", "ae_enable", "awb_enable"})
+            for key in unknown:
+                print(f"camera controls: unknown key {key!r} ignored",
+                      flush=True)
+        except (TypeError, ValueError) as e:
+            print(f"camera controls: bad value ({e}); ignoring",
+                  flush=True)
+            return {}
+        if not raw:
+            return {}
+        try:
+            self._picam2.set_controls(raw)
+        except Exception as e:
+            print(f"camera controls: set_controls failed ({e}); "
+                  "previous settings kept", flush=True)
+            return {}
+        return dict(controls)
 
     def close(self):
         try:
@@ -122,6 +198,14 @@ class YoloSensor:
         self.event_registry = {}
         self.pending_capture = set()
         self.client = None
+        self.version = VERSION
+        self.started_at = utcnow_iso()
+        self.started_monotonic = time.time()
+        self.mqtt_connected = False
+        self.last_cycle_seconds = None
+        self.last_cycle_at = None
+        self.web_server = None
+        self.web_port = None
 
     # ---- topics ----
     def t_pi(self, *parts):
@@ -163,6 +247,7 @@ class YoloSensor:
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
         print(f"MQTT connected (rc={reason_code})", flush=True)
+        self.mqtt_connected = True
         for cam in self.cameras:
             cid = cam["id"]
             client.subscribe(self.t_cam(cid, "config", "set"), qos=1)
@@ -186,6 +271,7 @@ class YoloSensor:
 
     def on_disconnect(self, client, userdata, flags, reason_code, properties):
         print(f"MQTT disconnected (rc={reason_code})", flush=True)
+        self.mqtt_connected = False
 
     def on_message(self, client, userdata, msg):
         try:
@@ -203,21 +289,28 @@ class YoloSensor:
         os.chmod(tmp, 0o600)
         os.replace(tmp, CONFIG_PATH)
 
+    def buffer_dir(self, cam_id):
+        return os.path.join(PROJECT_DIR,
+                             self.config["buffer"].get("dir", "buffer"),
+                             cam_id)
+
     def buffer_stats(self, cam_id):
         files = bytes_ = 0
-        d = os.path.join(PROJECT_DIR, self.config["buffer"].get("dir", "buffer"), cam_id)
+        d = self.buffer_dir(cam_id)
         if os.path.isdir(d):
             for fn in os.listdir(d):
                 p = os.path.join(d, fn)
                 if os.path.isfile(p):
-                    files += 1
                     bytes_ += os.path.getsize(p)
+                    if fn.lower().endswith(".jpg"):
+                        files += 1
         return files, bytes_
 
-    def publish_camera_config(self, cam):
+    def camera_config_payload(self, cam):
+        """One camera-config dict shared by MQTT publish + web API."""
         cfg = cam["cfg"]
         files, bytes_ = self.buffer_stats(cam["id"])
-        self.publish_cam(cam, "config", {
+        return {
             "service": "muse-pi-yolo-mqtt", "version": VERSION,
             "cpu_serial": self.serial,
             "camera_id": cam["id"], "name": cam["obj"].name,
@@ -231,9 +324,15 @@ class YoloSensor:
             "watchlist": cfg.get("watchlist", []),
             "publish": cfg.get("publish", {}),
             "heartbeat_interval": cfg.get("heartbeat_interval", 600),
+            "camera_controls": cfg.get("camera_controls", {}),
+            "last_capture_at": cam.get("last_capture_at"),
             "buffer": {"files": files, "bytes": bytes_,
                        "cap_bytes": self.config["buffer"].get("cap_bytes", 2**30)},
-            "timestamp": utcnow_iso()}, retain=True)
+            "timestamp": utcnow_iso()}
+
+    def publish_camera_config(self, cam):
+        self.publish_cam(cam, "config",
+                         self.camera_config_payload(cam), retain=True)
 
     def publish_baseline(self, cam, cid):
         name = cam["id_to_name"][cid]
@@ -260,6 +359,7 @@ class YoloSensor:
                         self.publish_cam(cam, f"className/{name}", zero, retain=True)
         cam["watch_ids"] = new_ids
         cam["last_counts"] = {cid: 0 for cid in new_ids}
+        cam["pending_changes"] = {}
         cam["cfg"]["watchlist"] = valid
         if not initial:
             # initial baselines are published by on_connect (client may not
@@ -271,10 +371,47 @@ class YoloSensor:
     def drain_messages(self):
         while True:
             try:
-                topic, payload = self.msg_queue.get_nowait()
+                item = self.msg_queue.get_nowait()
             except queue.Empty:
                 break
-            self.handle_message(topic, payload)
+            if isinstance(item, tuple) and item and item[0] == "__web__":
+                self.handle_web_item(item)
+            else:
+                topic, payload = item
+                self.handle_message(topic, payload)
+
+    def handle_web_item(self, item):
+        """Config/capture requests from the web thread. Runs on the main
+        loop, so the main loop stays the single config writer."""
+        _, kind, cam_id, cmd, ack, result = item
+        cam = next((c for c in self.cameras if c["id"] == cam_id), None)
+        try:
+            if cam is None:
+                result["error"] = f"unknown camera {cam_id}"
+            elif kind == "config":
+                self.apply_config_command(cam, cmd)
+                result["camera"] = self.camera_config_payload(cam)
+            elif kind == "capture_now":
+                self.pending_capture.add(cam_id)
+                result["ok"] = True
+            else:
+                result["error"] = f"unknown web item {kind}"
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            ack.set()
+
+    def enqueue_web(self, kind, cam_id, cmd=None, timeout=10.0):
+        """Called from the web thread: route a request through the main
+        loop and wait for the result. Returns (result_dict, ok)."""
+        ack = threading.Event()
+        result = {}
+        self.msg_queue.put(("__web__", kind, cam_id, cmd or {}, ack, result))
+        if not ack.wait(timeout=timeout):
+            return {"error": "timed out waiting for main loop"}, False
+        if "error" in result:
+            return result, False
+        return result, True
 
     def handle_message(self, topic, payload):
         parts = topic.split("/")
@@ -313,6 +450,17 @@ class YoloSensor:
             cfg["heartbeat_interval"] = int(cmd["heartbeat_interval"]); changed = True
         if "publish" in cmd and isinstance(cmd["publish"], dict):
             cfg.setdefault("publish", {}).update(cmd["publish"]); changed = True
+        if "camera_controls" in cmd and isinstance(cmd["camera_controls"], dict):
+            merged = dict(cfg.get("camera_controls", {}))
+            merged.update(cmd["camera_controls"])
+            cfg["camera_controls"] = merged
+            try:
+                cam["obj"].apply_camera_controls(merged)
+            except Exception as e:
+                print(f"[{cam['id']}] camera controls failed: {e}", flush=True)
+            changed = True
+        if "imgsz" in cmd:
+            cfg["imgsz"] = int(cmd["imgsz"]); changed = True
         if cmd.get("capture_now"):
             self.pending_capture.add(cam["id"])
             print(f"[{cam['id']}] capture_now triggered", flush=True)
@@ -334,12 +482,26 @@ class YoloSensor:
         with open(matches[0], "rb") as f:
             jpeg_b64 = base64.b64encode(f.read()).decode("ascii")
         reg = self.event_registry.get(event_id, {})
+        sidecar = self.load_event_sidecar(cam, event_id)
+        timestamp = reg.get("timestamp") or (sidecar or {}).get("timestamp")
+        detections = reg.get("detections") or (sidecar or {}).get(
+            "detections", {})
         self.publish_cam(cam, "images/response", {
             "event_id": event_id,
-            "timestamp": reg.get("timestamp"),
+            "timestamp": timestamp,
             "jpeg_base64": jpeg_b64,
-            "detections": reg.get("detections", {})})
+            "detections": detections})
         print(f"[{cam['id']}] served image {event_id}", flush=True)
+
+    def load_event_sidecar(self, cam, event_id):
+        """Read <event_id>.json if present; None if missing/unreadable."""
+        p = os.path.join(self.buffer_dir(cam["id"]), event_id + ".json")
+        try:
+            with open(p) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
 
     # ---- inference cycle ----
     def new_event_id(self):
@@ -363,7 +525,9 @@ class YoloSensor:
             print(f"[{cam['id']}] empty watchlist, skipping", flush=True)
             return
         frame, _ = cam["obj"].capture()
+        cam["latest_frame"] = frame
         ts = utcnow_iso()
+        cam["last_capture_at"] = ts
         results = cam["model_obj"](frame, classes=cam["watch_ids"],
                                    conf=cfg.get("confidence_threshold", 0.5),
                                    imgsz=cfg.get("imgsz", 640),
@@ -383,17 +547,46 @@ class YoloSensor:
                     "confidence": round(c, 3),
                     "bbox": [round(x1 / w, 4), round(y1 / h, 4),
                              round(x2 / w, 4), round(y2 / h, 4)]})
-        changed = [cid for cid in cam["watch_ids"]
-                   if counts[cid] != cam["last_counts"][cid]]
+        # Confirm-2 debounce: a count change counts only after the same
+        # value is observed in 2 consecutive inference cycles. A 1-cycle
+        # flicker (e.g. a marginal detection blinking around the
+        # threshold) is swallowed; a real change is delayed one cycle.
+        pending = cam.setdefault("pending_changes", {})
+        changed = []
+        for cid in cam["watch_ids"]:
+            if counts[cid] != cam["last_counts"][cid]:
+                prev = pending.get(cid)
+                if prev and prev.get("count") == counts[cid]:
+                    prev["seen"] += 1
+                else:
+                    pending[cid] = {"count": counts[cid], "seen": 1}
+                if pending[cid]["seen"] >= 2:
+                    changed.append(cid)
+            else:
+                pending.pop(cid, None)
         if not changed:
             return
+        # Act on confirmed changes only; drop their pending entries.
+        for cid in changed:
+            pending.pop(cid, None)
         event_id = self.new_event_id()
         self.event_registry[event_id] = {
             "timestamp": ts,
             "detections": {cam["id_to_name"][c]: dets[c] for c in changed}}
         while len(self.event_registry) > EVENT_REGISTRY_MAX:
             self.event_registry.pop(next(iter(self.event_registry)))
-        self.store_frame(cam, event_id, frame)
+        event_data = {
+            "event_id": event_id,
+            "camera_id": cam["id"],
+            "timestamp": ts,
+            "counts": {cam["id_to_name"][c]: counts[c]
+                       for c in cam["watch_ids"]},
+            "detections": {cam["id_to_name"][c]: dets[c]
+                           for c in cam["watch_ids"]},
+            "model": cfg.get("model", "yolov8n"),
+            "threshold": cfg.get("confidence_threshold", 0.5),
+        }
+        self.store_frame(cam, event_id, frame, event_data)
         for cid in changed:
             cam["last_counts"][cid] = counts[cid]
             name = cam["id_to_name"][cid]
@@ -414,14 +607,26 @@ class YoloSensor:
               flush=True)
 
     # ---- ring buffer ----
-    def store_frame(self, cam, event_id, frame):
-        buf_dir = os.path.join(PROJECT_DIR,
-                               self.config["buffer"].get("dir", "buffer"),
-                               cam["id"])
+    def store_frame(self, cam, event_id, frame, event_data=None):
+        buf_dir = self.buffer_dir(cam["id"])
         os.makedirs(buf_dir, exist_ok=True)
         quality = self.config["buffer"].get("jpeg_quality", 85)
         cv2.imwrite(os.path.join(buf_dir, f"{event_id}.jpg"), frame,
                     [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if event_data is not None:
+            sidecar = dict(event_data)
+            sidecar["image"] = f"{event_id}.jpg"
+            tmp = os.path.join(buf_dir, f".{event_id}.json.tmp")
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(sidecar, f, indent=2)
+                os.replace(tmp, os.path.join(buf_dir, f"{event_id}.json"))
+            except OSError as e:
+                print(f"[{cam['id']}] sidecar write failed: {e}", flush=True)
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         self.enforce_buffer_cap()
 
     def enforce_buffer_cap(self):
@@ -429,21 +634,45 @@ class YoloSensor:
                                 self.config["buffer"].get("dir", "buffer"))
         cap = self.config["buffer"].get("cap_bytes", 2**30)
         max_files = self.config["buffer"].get("max_files", 5000)
-        entries = []
+        jpgs = []  # (mtime, size, path) for .jpg files only
+        total = 0
+        orphans = []  # sidecars/tmp files with no matching .jpg
         for dirpath, _, fns in os.walk(buf_root):
             for fn in fns:
                 p = os.path.join(dirpath, fn)
                 try:
-                    entries.append((os.path.getmtime(p), os.path.getsize(p), p))
+                    sz = os.path.getsize(p)
+                except OSError:
+                    continue
+                total += sz
+                low = fn.lower()
+                if low.endswith(".jpg"):
+                    try:
+                        jpgs.append((os.path.getmtime(p), sz, p))
+                    except OSError:
+                        pass
+                elif low.endswith(".json"):
+                    base = fn[:-5]
+                    if not os.path.exists(
+                            os.path.join(dirpath, base + ".jpg")):
+                        orphans.append(p)
+                elif low.endswith(".tmp"):
+                    orphans.append(p)
+        jpgs.sort()
+        while (total > cap or len(jpgs) > max_files) and jpgs:
+            _, s, p = jpgs.pop(0)
+            # Evict the .jpg AND its .json sidecar as one pair.
+            for q in (p, os.path.splitext(p)[0] + ".json"):
+                try:
+                    if os.path.exists(q):
+                        total -= os.path.getsize(q)
+                        os.remove(q)
                 except OSError:
                     pass
-        entries.sort()
-        total = sum(s for _, s, _ in entries)
-        while (total > cap or len(entries) > max_files) and entries:
-            _, s, p = entries.pop(0)
+        # A .json whose .jpg is gone (manual delete, crash) is dead weight.
+        for p in orphans:
             try:
                 os.remove(p)
-                total -= s
             except OSError:
                 pass
 
@@ -464,7 +693,9 @@ class YoloSensor:
                    "model_obj": model,
                    "name_to_id": name_to_id,
                    "id_to_name": {k: v for v, k in name_to_id.items()},
-                   "watch_ids": [], "last_counts": {}, "last_cycle": 0}
+                   "watch_ids": [], "last_counts": {}, "last_cycle": 0,
+                   "pending_changes": {}, "latest_frame": None,
+                   "last_capture_at": None}
             self.set_watchlist(cam, ccfg.get("watchlist", []), initial=True)
             self.cameras.append(cam)
         if not self.cameras:
@@ -477,6 +708,11 @@ class YoloSensor:
 
     def shutdown(self):
         print("shutting down", flush=True)
+        if self.web_server is not None:
+            try:
+                self.web_server.stop()
+            except Exception:
+                pass
         for cam in self.cameras:
             try:
                 self.publish_cam(cam, "status",
@@ -500,8 +736,30 @@ class YoloSensor:
         except Exception:
             pass
 
+    def start_web(self):
+        """Start the Jaeger web UI. A failure here must never take down
+        the sensor: log and continue without the UI."""
+        if JaegerWebServer is None:
+            print("web UI unavailable (web_ui import failed)", flush=True)
+            return
+        web_cfg = self.config.get("web", {})
+        if not web_cfg.get("enabled", True):
+            return
+        host = web_cfg.get("host", "0.0.0.0")
+        port = int(web_cfg.get("port", 8082))
+        try:
+            self.web_server = JaegerWebServer(self, host, port)
+            self.web_server.start()
+            self.web_port = port
+            print(f"web UI listening on {host}:{port}", flush=True)
+        except Exception as e:
+            print(f"web UI failed to start ({e}); continuing without it",
+                  flush=True)
+            self.web_server = None
+
     def run(self):
         self.setup_cameras()
+        self.start_web()
         self.mqtt_connect()
         signal.signal(signal.SIGTERM, self.handle_signal)
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -531,6 +789,8 @@ class YoloSensor:
                     except Exception as e:
                         print(f"[{cid}] cycle error: {e}", flush=True)
                     print(f"[{cid}] cycle {time.time() - t0:.1f}s", flush=True)
+                    self.last_cycle_seconds = round(time.time() - t0, 2)
+                    self.last_cycle_at = utcnow_iso()
             time.sleep(0.2)
         self.shutdown()
 
