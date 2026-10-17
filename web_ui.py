@@ -1,4 +1,4 @@
-"""Jaeger web UI (v0.2.1): embedded HTTP server for muse-pi-yolo-mqtt.
+"""Jaeger web UI (v0.3.0): embedded HTTP server for muse-pi-yolo-mqtt.
 
 Serves the static UI plus a small JSON API backed by the live YoloSensor
 object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).
@@ -6,6 +6,10 @@ object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).
 The sensor owns all config writes: UI config/capture requests are routed
 through the sensor's message queue so the main loop stays the single
 config writer (same path as MQTT config/set).
+
+Camera passwords are NEVER returned by any API and NEVER logged: the
+per-camera payload carries only a has_password flag, and the connection
+test returns a thumbnail + resolution + codec only.
 """
 
 import base64
@@ -152,6 +156,16 @@ class JaegerWebServer:
                     return False
                 return cam
 
+            def _cam_path(self):
+                """Split /api/cameras[/<id>[/<action>]] -> (id, action)."""
+                parts = [p for p in urlparse(self.path).path.split("/")
+                         if p]
+                if len(parts) < 2 or parts[0] != "api" or parts[1] != "cameras":
+                    return None, None
+                cam_id = parts[2] if len(parts) > 2 else None
+                action = parts[3] if len(parts) > 3 else None
+                return cam_id, action
+
             # ---- routing ----
             def do_GET(self):
                 parsed = urlparse(self.path)
@@ -201,8 +215,57 @@ class JaegerWebServer:
                         self._api_config_post()
                     elif parsed.path == "/api/capture_now":
                         self._api_capture_now()
+                    elif parsed.path == "/api/cameras":
+                        self._api_cameras_add()
+                    elif parsed.path == "/api/cameras/test":
+                        self._api_cameras_test()
+                    elif parsed.path == "/api/cameras/rescan":
+                        self._api_cameras_rescan()
+                    elif parsed.path.startswith("/api/cameras/"):
+                        cam_id, action = self._cam_path()
+                        if action == "pause":
+                            self._api_camera_pause(cam_id)
+                        elif action == "resume":
+                            self._api_camera_resume(cam_id)
+                        elif action is None:
+                            # POST /api/cameras/<id> is edit (same as PATCH)
+                            self._api_camera_edit(cam_id)
+                        else:
+                            self._send_error_json(404, "not found")
                     else:
                         self._send_error_json(404, "not found")
+                except BrokenPipeError:
+                    pass
+                except Exception as e:
+                    try:
+                        self._send_error_json(500, f"internal error: {e}")
+                    except Exception:
+                        pass
+
+            def do_PATCH(self):
+                try:
+                    if urlparse(self.path).path.startswith("/api/cameras/"):
+                        cam_id, action = self._cam_path()
+                        if action is None and cam_id:
+                            self._api_camera_edit(cam_id)
+                            return
+                    self._send_error_json(404, "not found")
+                except BrokenPipeError:
+                    pass
+                except Exception as e:
+                    try:
+                        self._send_error_json(500, f"internal error: {e}")
+                    except Exception:
+                        pass
+
+            def do_DELETE(self):
+                try:
+                    if urlparse(self.path).path.startswith("/api/cameras/"):
+                        cam_id, action = self._cam_path()
+                        if action is None and cam_id:
+                            self._api_camera_delete(cam_id)
+                            return
+                    self._send_error_json(404, "not found")
                 except BrokenPipeError:
                     pass
                 except Exception as e:
@@ -238,6 +301,8 @@ class JaegerWebServer:
                     "service": "jaeger",
                     "version": getattr(s, "version", VERSION_FALLBACK),
                     "cpu_serial": s.serial,
+                    "model": getattr(s, "model_name", None),
+                    "saturation": s.saturation(),
                     "mqtt_connected": bool(s.mqtt_connected),
                     "uptime_seconds": uptime,
                     "started_at": s.started_at,
@@ -413,7 +478,8 @@ class JaegerWebServer:
                 if cam is None:
                     self._send_error_json(404, "no cameras configured")
                     return
-                frame = cam.get("latest_frame")
+                with cam["slot_lock"]:
+                    frame = cam.get("slot")
                 if frame is None:
                     self._send_error_json(404, "no frame captured yet")
                     return
@@ -482,12 +548,45 @@ class JaegerWebServer:
                     self._send_error_json(400, "need JSON {camera_id, ...}")
                     return
                 cam_id = body["camera_id"]
-                cmd = {k: v for k, v in body.items() if k != "camera_id"}
-                result, ok = sensor_ref.enqueue_web("config", cam_id, cmd)
-                if not ok:
-                    self._send_error_json(400, result.get("error", "failed"))
+                # Service-level keys (model, buffer cap) go through the
+                # service-config path; the rest are per-camera tunables.
+                service_keys = {}
+                cam_cmd = {}
+                for k, v in body.items():
+                    if k == "camera_id":
+                        continue
+                    if k in ("model", "buffer_cap_mb"):
+                        service_keys[k] = v
+                    else:
+                        cam_cmd[k] = v
+                if cam_id == "service":
+                    if not service_keys and not cam_cmd:
+                        self._send_error_json(400, "nothing to set")
+                        return
+                    merged = dict(service_keys)
+                    merged.update(cam_cmd)
+                    result, ok = sensor_ref.enqueue_web(
+                        "service_config", None, merged)
+                    if not ok:
+                        self._send_error_json(400, result.get("error", "failed"))
+                        return
+                    self._send_json({"ok": True})
                     return
-                self._send_json(result.get("camera", {}))
+                if service_keys:
+                    result, ok = sensor_ref.enqueue_web(
+                        "service_config", None, service_keys)
+                    if not ok:
+                        self._send_error_json(400, result.get("error", "failed"))
+                        return
+                if cam_cmd:
+                    result, ok = sensor_ref.enqueue_web(
+                        "config", cam_id, cam_cmd)
+                    if not ok:
+                        self._send_error_json(400, result.get("error", "failed"))
+                        return
+                    self._send_json(result.get("camera", {}))
+                else:
+                    self._send_json({"ok": True})
 
             def _api_capture_now(self):
                 body = self._read_json_body()
@@ -500,6 +599,79 @@ class JaegerWebServer:
                     self._send_error_json(400, result.get("error", "failed"))
                     return
                 self._send_json({"ok": True})
+
+            # ---- camera lifecycle (v0.3.0) ----
+            def _api_cameras_test(self):
+                """POST /api/cameras/test: connection test. Persists
+                nothing, never echoes credentials, bounded timeout."""
+                body = self._read_json_body()
+                if body is None:
+                    self._send_error_json(400, "need JSON camera form")
+                    return
+                cam_id = body.get("camera_id")
+                try:
+                    result = sensor_ref.test_camera(body, cam_id)
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                except Exception as e:
+                    self._send_error_json(500, f"test failed: {e}")
+                    return
+                self._send_json(result)
+
+            def _api_cameras_add(self):
+                body = self._read_json_body()
+                if body is None:
+                    self._send_error_json(400, "need JSON camera form")
+                    return
+                result, ok = sensor_ref.enqueue_web(
+                    "camera_add", None, body, timeout=60.0)
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json(result.get("camera", {}), status=201)
+
+            def _api_camera_edit(self, cam_id):
+                body = self._read_json_body()
+                if body is None:
+                    self._send_error_json(400, "need JSON camera form")
+                    return
+                result, ok = sensor_ref.enqueue_web(
+                    "camera_edit", cam_id, body, timeout=60.0)
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json(result.get("camera", {}))
+
+            def _api_camera_pause(self, cam_id):
+                result, ok = sensor_ref.enqueue_web("camera_pause", cam_id, {})
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json(result.get("camera", {}))
+
+            def _api_camera_resume(self, cam_id):
+                result, ok = sensor_ref.enqueue_web("camera_resume", cam_id, {})
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json(result.get("camera", {}))
+
+            def _api_camera_delete(self, cam_id):
+                result, ok = sensor_ref.enqueue_web(
+                    "camera_delete", cam_id, {})
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json({"ok": True})
+
+            def _api_cameras_rescan(self):
+                result, ok = sensor_ref.enqueue_web("rescan", None, {},
+                                                    timeout=30.0)
+                if not ok:
+                    self._send_error_json(400, result.get("error", "failed"))
+                    return
+                self._send_json(result.get("camera", {}))
 
         self._handler = Handler
         self._httpd = _Server((host, port), Handler)

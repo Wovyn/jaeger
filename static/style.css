@@ -8,6 +8,8 @@ header h1 span { font-size: 0.6em; font-weight: normal; color: #9fb3c8; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 .dot.online { background: #3c3; }
 .dot.offline { background: #c33; }
+.dot.degraded { background: #e6a817; }
+.dot.paused { background: #7a8aa0; }
 #statusText { font-size: 0.85em; color: #cbd6e2; }
 #menuBtn { font-size: 1.4em; background: none; border: none; color: #fff; cursor: pointer; }
 #menu { position: absolute; right: 0.5em; top: 3em; background: #fff; color: #111;
@@ -28,8 +30,27 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
   margin-bottom: 0.5em; cursor: pointer; }
 #cameraList li.selected { border-color: #2563eb; background: #eef4ff; }
 #cameraList .cam-meta { font-size: 0.85em; color: #555; }
-#addCameraBtn { font-size: 1.4em; color: #999; background: #eee; border: 1px dashed #bbb;
-  border-radius: 6px; padding: 0.1em 0.5em; cursor: not-allowed; }
+#cameraList .cam-row { display: flex; gap: 0.6em; align-items: flex-start; }
+#cameraList .cam-icon { flex: 0 0 auto; width: 28px; height: 28px; color: #334155; }
+#cameraList .cam-icon svg { width: 28px; height: 28px; }
+#cameraList .cam-main { flex: 1; min-width: 0; }
+#cameraList .cam-controls { display: flex; gap: 0.25em; flex: 0 0 auto; }
+#cameraList .cam-controls button { font-size: 0.85em; padding: 0.2em 0.45em;
+  cursor: pointer; background: #eef2f7; border: 1px solid #cbd5e1;
+  border-radius: 4px; }
+#cameraList .cam-controls button:hover { background: #dbeafe; }
+#cameraList .cam-controls button.danger:hover { background: #fee2e2; }
+#cameraList .cam-meta .dot { width: 9px; height: 9px; margin-right: 0.3em; }
+.load-indicator { font-size: 0.85em; color: #555; margin: -0.4em 0 0.6em; }
+.load-indicator.warn { color: #b45309; font-weight: bold; }
+.empty-state { font-size: 0.9em; color: #555; border: 1px dashed #bbb;
+  border-radius: 6px; padding: 0.8em; margin-bottom: 0.6em; }
+#addCameraBtn { font-size: 1.4em; color: #2563eb; background: #eef4ff;
+  border: 1px solid #93c5fd; border-radius: 6px; padding: 0.1em 0.5em;
+  cursor: pointer; }
+#rescanBtn { font-size: 0.9em; padding: 0.35em 0.6em; cursor: pointer;
+  background: #eef2f7; border: 1px solid #cbd5e1; border-radius: 6px;
+  margin-left: 0.4em; }
 #countsList { display: grid; grid-template-columns: 1fr auto; gap: 0.15em 1em; }
 #countsList li { display: contents; }
 #countsList .count-row { display: contents; cursor: pointer; }
@@ -51,13 +72,13 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 #eventsEnd { text-align: center; color: #777; padding: 1em; }
 
 /* Modals */
-#modal, #settingsModal, #aboutModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+#modal, #settingsModal, #aboutModal, #cameraModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal-box { background: #fff; border-radius: 8px; padding: 1.2em; max-width: 92vw;
   max-height: 92vh; overflow: auto; position: relative; }
 .about-box { width: min(90vw, 480px); aspect-ratio: 1 / 1; }
 .about-logo { display: block; width: 96px; height: 96px; margin: 0 auto 0.6em; }
-#modalClose, #settingsClose, #aboutClose { position: absolute; top: 0.4em; right: 0.6em;
+#modalClose, #settingsClose, #aboutClose, #cameraClose { position: absolute; top: 0.4em; right: 0.6em;
   font-size: 1.4em; background: none; border: none; cursor: pointer; z-index: 10; }
 #modalClose { background: rgba(0,0,0,0.6); color: #fff; border-radius: 50%;
   width: 1.6em; height: 1.6em; line-height: 1.6em; text-align: center; padding: 0; }
@@ -70,10 +91,25 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 .modal-controls { display: flex; gap: 1em; align-items: center; justify-content: center;
   margin-top: 0.6em; }
 #modalCaption { text-align: center; font-size: 0.9em; color: #444; margin-top: 0.4em; }
-#settingsForm label { display: block; margin: 0.6em 0; }
-#settingsForm input[type="number"], #settingsForm select { width: 100%; padding: 0.3em; }
+#settingsForm label, #cameraForm label { display: block; margin: 0.6em 0; }
+#settingsForm input[type="number"], #settingsForm select,
+#cameraForm input[type="text"], #cameraForm input[type="number"],
+#cameraForm input[type="password"], #cameraForm select { width: 100%; padding: 0.3em; }
+#cameraForm fieldset, #settingsForm fieldset { margin: 0.8em 0; border: 1px solid #ddd;
+  border-radius: 6px; padding: 0.2em 0.9em 0.8em; }
 .checkbox-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.2em 0.8em; }
 .checkbox-grid label { margin: 0; font-size: 0.9em; }
+.icon-picker { display: flex; gap: 0.4em; flex-wrap: wrap; }
+.icon-picker button { width: 44px; height: 44px; padding: 4px; cursor: pointer;
+  background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; }
+.icon-picker button.selected { border-color: #2563eb; background: #eef4ff; }
+.icon-picker svg { width: 32px; height: 32px; }
+.icon-picker .icon-label { display: block; font-size: 0.65em; text-align: center; color: #555; }
+.test-result { display: flex; gap: 0.8em; align-items: center; border: 1px solid #bbf7d0;
+  background: #f0fdf4; border-radius: 6px; padding: 0.6em; margin: 0.6em 0; }
+.test-result img { width: 160px; height: auto; border-radius: 4px; background: #222; }
+.form-actions { display: flex; gap: 0.6em; margin-top: 0.8em; }
+.form-actions button { padding: 0.4em 0.9em; cursor: pointer; }
 .hint { font-size: 0.85em; color: #555; }
 .error { color: #c00; min-height: 1.2em; }
 

@@ -18,3 +18,7 @@ their official distributions; no vendored copies):
 - Picamera2 (BSD 2-Clause) — https://github.com/raspberrypi/picamera2
   Raspberry Pi camera access (Debian distro package python3-picamera2).
 - NumPy (BSD-3-Clause) — https://numpy.org/
+
+The camera icons in static/app.js (generic camera, door, garage, driveway,
+garden/yard, entrance, room, board/chip) are original works created for
+this project. No icon files are copied from the internet.

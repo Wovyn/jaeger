@@ -1,4 +1,4 @@
-// Jaeger web UI (v0.2.1) — vanilla JS, no frameworks.
+// Jaeger web UI (v0.3.0) — vanilla JS, no frameworks.
 (function () {
   "use strict";
   var state = {
@@ -16,7 +16,36 @@
     eventsStale: false,
     stream: null,
     modalIndex: -1,
+    editingCameraId: null, // null = add mode
+    cameraIcon: "camera",
   };
+
+  // Camera icons: ~8 simple ORIGINAL SVGs, hand-written for Jaeger
+  // (generic camera, door, garage, driveway, garden/yard, entrance,
+  // room, board/chip for the Pi camera). 24x24, stroke-based.
+  var ICONS = {
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><circle cx="12" cy="12.5" r="3"/><path d="M8 6l1.5-2h5L16 6"/></svg>',
+    door: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="1"/><circle cx="14.5" cy="12" r="0.8" fill="currentColor" stroke="none"/></svg>',
+    garage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7"/><rect x="5" y="11" width="14" height="10"/><path d="M8 21v-6h8v6"/><path d="M5 15.5h14"/></svg>',
+    driveway: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21L11 3h2l3 18"/><path d="M5 21h14"/><path d="M6.5 15h11"/></svg>',
+    garden: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21v-8"/><path d="M12 13c0-4 3-6 6-6 0 4-3 6-6 6z"/><path d="M12 13c0-4-3-6-6-6 0 4 3 6 6 6z"/><path d="M4 21h16"/></svg>',
+    entrance: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V8l6-5 6 5v13"/><path d="M10 21v-6h4v6"/><path d="M3 21h18"/></svg>',
+    room: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18"/><path d="M4 12h8"/><path d="M12 12v9"/><circle cx="15.5" cy="16.5" r="0.8" fill="currentColor" stroke="none"/></svg>',
+    board: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M9 3v4M12 3v4M15 3v4M9 17v4M12 17v4M15 17v4M3 9h4M3 12h4M3 15h4M17 9h4M17 12h4M17 15h4"/></svg>',
+  };
+  var ICON_LABELS = {
+    camera: "Camera", door: "Door", garage: "Garage", driveway: "Driveway",
+    garden: "Garden", entrance: "Entrance", room: "Room", board: "Board",
+  };
+  function iconSVG(key) {
+    return ICONS[key] || ICONS.camera;
+  }
+  function escHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;",
+               '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
 
   function $(id) { return document.getElementById(id); }
   function fmtLocal(ts) {
@@ -33,6 +62,9 @@
     if (n == null) return "—";
     if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
     return (n / 1048576).toFixed(0) + " MB";
+  }
+  function fmtSecs(v) {
+    return v == null ? "—" : v + "s";
   }
   function countsSummary(counts) {
     var parts = [];
@@ -88,6 +120,12 @@
     $("bufferUsage").textContent =
       "Buffer: " + fmtBytes(s.buffer.bytes) + " / " +
       fmtBytes(s.buffer.cap_bytes) + " (" + s.buffer.files + " images)";
+    var load = $("loadIndicator");
+    if (s.saturation != null) {
+      load.textContent = "Inference load: " + s.saturation +
+        (s.saturation > 1.0 ? " — saturated, frames are being superseded" : "");
+      load.classList.toggle("warn", s.saturation > 1.0);
+    }
   }
 
   function loadStatus() {
@@ -120,11 +158,66 @@
       var li = document.createElement("li");
       if (c.camera_id === state.selectedCamera) li.className = "selected";
       var status = c.status || "online";
-      li.innerHTML =
-        "<div><b>" + c.name + "</b> (" + c.camera_id + ")</div>" +
-        "<div class='cam-meta'>" + c.type + " · " +
-        c.resolution.join("x") + " · " + status + "<br>last capture: " +
-        fmtLocal(c.last_capture_at) + "</div>";
+      var row = document.createElement("div");
+      row.className = "cam-row";
+      var icon = document.createElement("span");
+      icon.className = "cam-icon";
+      icon.innerHTML = iconSVG(c.icon);
+      icon.title = c.icon || "";
+      row.appendChild(icon);
+      var main = document.createElement("div");
+      main.className = "cam-main";
+      main.innerHTML =
+        "<div><b>" + escHtml(c.name) + "</b> (" + escHtml(c.camera_id) + ")</div>" +
+        "<div class='cam-meta'><span class='dot " + escHtml(status) + "'></span>" +
+        escHtml(c.type) + " · " + escHtml(c.resolution.join("x")) + " · " +
+        escHtml(status) + (c.paused ? " (paused)" : "") +
+        "<br>last grab: " + fmtLocal(c.last_grab_at) +
+        " (" + fmtSecs(c.last_grab_seconds) + ") · last inference: " +
+        fmtLocal(c.last_inference_at) + " (" + fmtSecs(c.last_inference_seconds) + ")" +
+        (c.grab_error ? "<br>error: " + escHtml(c.grab_error) : "") +
+        "</div>";
+      row.appendChild(main);
+      var controls = document.createElement("div");
+      controls.className = "cam-controls";
+      var pauseBtn = document.createElement("button");
+      pauseBtn.textContent = c.paused ? "Resume" : "Pause";
+      pauseBtn.title = c.paused ? "Resume this camera" : "Pause this camera (disconnects the RTSP stream)";
+      pauseBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        api("/api/cameras/" + encodeURIComponent(c.camera_id) +
+          (c.paused ? "/resume" : "/pause"),
+          { method: "POST" }).then(function () {
+            loadCameras(); loadStatus();
+          }).catch(function (err) { alert("Failed: " + err.message); });
+      });
+      controls.appendChild(pauseBtn);
+      if (c.type === "rtsp") {
+        var editBtn = document.createElement("button");
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          openCameraModal("edit", c);
+        });
+        controls.appendChild(editBtn);
+        var delBtn = document.createElement("button");
+        delBtn.textContent = "Delete";
+        delBtn.className = "danger";
+        delBtn.title = "Delete this camera (buffered images are kept)";
+        delBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (confirm("Delete camera '" + c.name + "'? Buffered images are kept, but its MQTT topics are cleared.")) {
+            api("/api/cameras/" + encodeURIComponent(c.camera_id),
+              { method: "DELETE" }).then(function () {
+                if (state.selectedCamera === c.camera_id) state.selectedCamera = null;
+                loadCameras(); loadStatus(); loadEvents(true);
+              }).catch(function (err) { alert("Delete failed: " + err.message); });
+          }
+        });
+        controls.appendChild(delBtn);
+      }
+      row.appendChild(controls);
+      li.appendChild(row);
       li.addEventListener("click", function () {
         state.selectedCamera = c.camera_id;
         renderCameras();
@@ -133,6 +226,9 @@
       });
       list.appendChild(li);
     });
+    $("noCamerasEmpty").classList.toggle("hidden", state.cameras.length > 0);
+    var hasPi = state.cameras.some(function (c) { return c.type === "picamera"; });
+    $("rescanBtn").classList.toggle("hidden", hasPi);
   }
 
   function renderCameraFilter() {
@@ -162,7 +258,7 @@
           if (count === 0 && !showZero) return;
           var row = document.createElement("li");
           row.className = "count-row";
-          row.innerHTML = "<span class='count-name'>" + name +
+          row.innerHTML = "<span class='count-name'>" + escHtml(name) +
             "</span><span class='count-value'>" + count + "</span>";
           row.addEventListener("click", function () {
             setClassFilter(name);
@@ -228,8 +324,8 @@
       var timeHtml = "<span class='event-time' title='" + fmtUTC(e.timestamp) +
         "'>" + fmtLocal(e.timestamp) + "</span>";
       li.innerHTML =
-        "<div class='event-info'><b>" + e.camera_id + "</b> " + timeHtml +
-        "<div class='event-objs'>" + countsSummary(e.counts) + "</div>" +
+        "<div class='event-info'><b>" + escHtml(e.camera_id) + "</b> " + timeHtml +
+        "<div class='event-objs'>" + escHtml(countsSummary(e.counts)) + "</div>" +
         (e.has_metadata ? "" : "<div class='event-objs'>no metadata</div>") +
         "</div>" +
         "<img src='" + e.image_url + "' alt='Event image' loading='lazy'>";
@@ -301,6 +397,155 @@
       }).catch(function () { /* no frame yet */ });
   }
 
+  // ---- camera add/edit modal ----
+  function buildIconPicker() {
+    var box = $("iconPicker");
+    box.innerHTML = "";
+    Object.keys(ICONS).forEach(function (key) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.icon = key;
+      btn.title = ICON_LABELS[key] || key;
+      btn.innerHTML = iconSVG(key) +
+        "<span class='icon-label'>" + escHtml(ICON_LABELS[key] || key) + "</span>";
+      if (key === state.cameraIcon) btn.classList.add("selected");
+      btn.addEventListener("click", function () {
+        state.cameraIcon = key;
+        box.querySelectorAll("button").forEach(function (b) {
+          b.classList.toggle("selected", b.dataset.icon === key);
+        });
+      });
+      box.appendChild(btn);
+    });
+  }
+
+  function cameraFormValues() {
+    var form = $("cameraForm");
+    return {
+      name: form.name.value,
+      icon: state.cameraIcon,
+      scheme: form.scheme.value,
+      host: form.host.value,
+      port: parseInt(form.port.value, 10),
+      path: form.path.value,
+      stream: form.stream.value,
+      transport: form.transport.value,
+      connection_mode: form.connection_mode.value,
+      timeout_s: parseInt(form.timeout_s.value, 10),
+      credentials_on: form.credentials_on.checked,
+      username: form.username.value,
+      password: form.password.value,
+      tls_allow_self_signed: form.tls_allow_self_signed.checked,
+      sample_interval: parseFloat(form.sample_interval.value),
+      snapshot_url: form.snapshot_url.value,
+      rotate: parseInt(form.rotate.value, 10),
+      start_paused: form.start_paused.checked,
+    };
+  }
+
+  function openCameraModal(mode, cam) {
+    var form = $("cameraForm");
+    state.editingCameraId = mode === "edit" && cam ? cam.camera_id : null;
+    state.cameraIcon = (mode === "edit" && cam && cam.icon) ? cam.icon : "camera";
+    buildIconPicker();
+    $("cameraTestResult").classList.add("hidden");
+    $("cameraError").textContent = "";
+    if (mode === "edit" && cam) {
+      $("cameraModalTitle").textContent = "Edit camera — " + cam.name;
+      $("cameraSaveBtn").textContent = "Save";
+      form.name.value = cam.name || "";
+      var rtsp = cam.rtsp || {};
+      form.scheme.value = rtsp.scheme || "rtsp";
+      form.host.value = rtsp.host || "";
+      form.port.value = rtsp.port != null ? rtsp.port : 554;
+      form.path.value = rtsp.path || "/";
+      form.stream.value = rtsp.stream || "main";
+      form.transport.value = rtsp.transport || "tcp";
+      form.connection_mode.value = rtsp.connection_mode || "persistent";
+      form.timeout_s.value = rtsp.timeout_s != null ? rtsp.timeout_s : 10;
+      form.credentials_on.checked = !!(rtsp.username || rtsp.has_password);
+      form.username.value = rtsp.username || "";
+      form.password.value = ""; // never prefilled; blank keeps stored
+      form.tls_allow_self_signed.checked = !!rtsp.tls_allow_self_signed;
+      form.sample_interval.value = cam.sample_interval != null ? cam.sample_interval : 5;
+      form.snapshot_url.value = rtsp.snapshot_url || "";
+      form.rotate.value = cam.rotate != null ? cam.rotate : 0;
+      form.start_paused.checked = !!cam.paused;
+    } else {
+      $("cameraModalTitle").textContent = "Add camera";
+      $("cameraSaveBtn").textContent = "Add";
+      form.reset();
+      form.port.value = 554;
+      form.timeout_s.value = 10;
+      form.sample_interval.value = 5;
+      form.rotate.value = 0;
+    }
+    updateCameraFormToggles();
+    $("cameraModal").classList.remove("hidden");
+  }
+
+  function updateCameraFormToggles() {
+    var form = $("cameraForm");
+    var creds = form.credentials_on.checked;
+    form.username.disabled = !creds;
+    form.password.disabled = !creds;
+    $("selfSignedRow").classList.toggle("hidden", form.scheme.value !== "rtsps");
+  }
+
+  function closeCameraModal() {
+    $("cameraModal").classList.add("hidden");
+    state.editingCameraId = null;
+  }
+
+  function testCameraConnection() {
+    var body = cameraFormValues();
+    if (state.editingCameraId) body.camera_id = state.editingCameraId;
+    $("cameraError").textContent = "";
+    $("cameraTestBtn").disabled = true;
+    return api("/api/cameras/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      $("cameraTestThumb").src = "data:image/jpeg;base64," + r.thumbnail_base64;
+      $("cameraTestMeta").textContent =
+        r.width + "x" + r.height + " · " + r.codec + " · " + r.source +
+        " · grab " + r.grab_seconds + "s";
+      $("cameraTestResult").classList.remove("hidden");
+    }).catch(function (e) {
+      $("cameraError").textContent = "Test failed: " + e.message;
+      $("cameraTestResult").classList.add("hidden");
+    }).then(function () { $("cameraTestBtn").disabled = false; });
+  }
+
+  function submitCameraForm(ev) {
+    ev.preventDefault();
+    var body = cameraFormValues();
+    $("cameraError").textContent = "";
+    $("cameraSaveBtn").disabled = true;
+    var req;
+    if (state.editingCameraId) {
+      req = api("/api/cameras/" + encodeURIComponent(state.editingCameraId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } else {
+      req = api("/api/cameras", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    req.then(function () {
+      closeCameraModal();
+      loadCameras();
+      loadStatus();
+    }).catch(function (e) {
+      $("cameraError").textContent = "Save failed: " + e.message;
+    }).then(function () { $("cameraSaveBtn").disabled = false; });
+  }
+
   // ---- menu / settings / about ----
   function openSettings() {
     if (!state.selectedCamera) return;
@@ -310,12 +555,13 @@
     Promise.all([
       api("/api/classes?camera=" + encodeURIComponent(camId)),
       api("/api/config?camera=" + encodeURIComponent(camId)),
+      api("/api/status"),
     ]).then(function (res) {
-      var classes = res[0], cfg = res[1];
+      var classes = res[0], cfg = res[1], status = res[2];
       var form = $("settingsForm");
       form.sample_interval.value = cfg.sample_interval;
       form.confidence_threshold.value = cfg.confidence_threshold;
-      form.model.value = cfg.model;
+      form.model.value = status.model || "yolov8n";
       form.imgsz.value = cfg.imgsz || 640;
       form.buffer_cap_mb.value = Math.round(
         (cfg.buffer.cap_bytes || 1073741824) / 1048576);
@@ -455,9 +701,25 @@
     $("bboxToggle").addEventListener("change", function () {
       $("modalSvg").style.display = $("bboxToggle").checked ? "" : "none";
     });
+    // Camera add/edit modal
+    $("addCameraBtn").addEventListener("click", function () {
+      openCameraModal("add", null);
+    });
+    $("cameraClose").addEventListener("click", closeCameraModal);
+    $("cameraCancelBtn").addEventListener("click", closeCameraModal);
+    $("cameraForm").addEventListener("submit", submitCameraForm);
+    $("cameraTestBtn").addEventListener("click", testCameraConnection);
+    $("cameraForm").credentials_on.addEventListener("change", updateCameraFormToggles);
+    $("cameraForm").scheme.addEventListener("change", updateCameraFormToggles);
+    $("rescanBtn").addEventListener("click", function () {
+      api("/api/cameras/rescan", { method: "POST" }).then(function () {
+        loadCameras(); loadStatus();
+      }).catch(function (e) { alert("Rescan failed: " + e.message); });
+    });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
         closeModal();
+        closeCameraModal();
         $("settingsModal").classList.add("hidden");
         $("aboutModal").classList.add("hidden");
       } else if (!$("modal").classList.contains("hidden")) {

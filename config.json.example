@@ -5,20 +5,16 @@
     "jpeg_quality": 85,
     "max_files": 5000
   },
-  "web": {
-    "enabled": true,
-    "host": "0.0.0.0",
-    "port": 8082
-  },
   "cameras": [
     {
-      "confidence_threshold": 0.5,
       "camera_controls": {},
+      "confidence_threshold": 0.5,
       "heartbeat_interval": 600,
+      "icon": "board",
       "id": "camera0",
       "imgsz": 640,
-      "model": "yolov8n",
       "name": "Pi Camera",
+      "paused": false,
       "publish": {
         "classId": true,
         "className": true,
@@ -28,6 +24,7 @@
         1280,
         720
       ],
+      "rotate": 0,
       "sample_interval": 5.0,
       "type": "picamera",
       "watchlist": [
@@ -40,14 +37,66 @@
         "bicycle",
         "motorcycle"
       ]
+    },
+    {
+      "confidence_threshold": 0.5,
+      "heartbeat_interval": 600,
+      "icon": "garage",
+      "id": "camera1",
+      "imgsz": 640,
+      "name": "Garage",
+      "paused": false,
+      "publish": {
+        "classId": true,
+        "className": true,
+        "events": true
+      },
+      "resolution": [
+        1280,
+        720
+      ],
+      "rotate": 0,
+      "rtsp": {
+        "connection_mode": "persistent",
+        "host": "192.168.1.50",
+        "password": "",
+        "path": "/h264/ch1/{stream}/av_stream",
+        "port": 554,
+        "scheme": "rtsp",
+        "snapshot_url": "",
+        "stream": "main",
+        "timeout_s": 10,
+        "tls_allow_self_signed": false,
+        "transport": "tcp",
+        "username": ""
+      },
+      "sample_interval": 5.0,
+      "type": "rtsp",
+      "watchlist": [
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "dog",
+        "cat",
+        "bicycle",
+        "motorcycle"
+      ]
     }
   ],
+  "model": "yolov8n",
   "mqtt": {
     "host": "YOUR-HIVEMQ-HOST.hivemq.cloud",
     "password": "YOUR-PASSWORD",
     "port": 8883,
     "tls": true,
-    "topic_root": "Wovyn/RaspberryPi/YOLOSensor",
+    "topic_root": "Wovyn/RaspberryPi/Jaeger",
     "username": "YOUR-USERNAME"
+  },
+  "next_camera_id": 2,
+  "web": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8082
   }
 }

@@ -1,8 +1,8 @@
 # muse-pi-yolo-mqtt
 
-Intelligent object recognition and notification on the Raspberry Pi: the Pi Camera
-captures frames at a low rate, YOLOv8 detects objects, results publish to MQTT only
-when the detected scene changes, and a bounded ring buffer keeps event images
+Intelligent object recognition and notification on the Raspberry Pi: cameras
+capture frames at a low rate, YOLOv8 detects objects, results publish to MQTT
+only when the scene changes, and a bounded ring buffer keeps event images
 retrievable on demand. Node-RED consumes the MQTT events for notifications
 (Pushover first) and other actions.
 
@@ -11,16 +11,19 @@ Wovyn R&D project. Apache 2.0.
 ## Status
 
 v0.1.0 implemented, tested, and pushed Oct 14, 2026 (single Pi Camera).
-v0.2.0 (Jaeger web UI) built and committed Oct 14, 2026, running live: web UI on port 8082,
-per-image JSON metadata sidecars, confirm-2 change debounce, and Picamera2
-camera controls (see DESIGN.md §13). Live testing produced feedback now addressed as v0.2.1 committed Oct 16, 2026 (testing-feedback fixes + logo; see DESIGN.md §14). The systemd unit is written but not
-enabled. See DESIGN.md for the plan, including the multi-camera/RTSP backlog.
+v0.2.0 (Jaeger web UI) built and committed Oct 14, 2026; v0.2.1 (testing-feedback
+fixes + logo) built and committed Oct 16, 2026 — the production service runs
+v0.2.1. v0.3.0 (RTSP + multi-camera) built and committed Oct 16, 2026, running live:
+capture threads + latest-frame slots + inference worker, RTSP cameras with
+persistent/per-capture connection modes, camera lifecycle APIs + Add/Edit
+modal, Jaeger MQTT tree. See DESIGN.md §15 for the design.
 
 ## Hardware
 
 - Raspberry Pi 4, 8 GB (Muse-Pi-1), Debian 13 (Trixie)
 - Python 3.13.5, user `musecell`
-- Camera: ArduCam 8MP v2.3 — a Sony IMX219 sensor module
+- Camera: ArduCam 8MP v2.3 — a Sony IMX219 sensor module (the Pi camera;
+  RTSP/IP cameras are additional sources in v0.3.0)
 
 ## 1. Camera setup
 
@@ -127,8 +130,8 @@ subprocess — proven working (see §4).
 
 ## 3. YOLO models
 
-Both nano and small are installed; the model is selectable at runtime
-(default: nano).
+Both nano and small are installed; one model is shared by all cameras and is
+selectable at runtime (default: nano) via the Settings modal (service-level).
 
 ```bash
 mkdir -p ~/projects/muse-pi-yolo-mqtt/models && cd ~/projects/muse-pi-yolo-mqtt/models
@@ -145,7 +148,7 @@ Proves the full chain: capture → inference.
 ```bash
 V=~/projects/muse-pi-yolo-mqtt/venv/bin
 rpicam-still -t 1500 -o /tmp/yolo-smoke.jpg
-$V/python - <<'EOF'
+$V/python - <<'EOF2'
 from ultralytics import YOLO
 import time
 m = YOLO('/home/musecell/projects/muse-pi-yolo-mqtt/models/yolov8n.pt')
@@ -154,7 +157,7 @@ r = m('/tmp/yolo-smoke.jpg', verbose=False)[0]
 print('inference ms:', round((time.time() - t) * 1000))
 for b in r.boxes:
     print(m.names[int(b.cls)], round(float(b.conf), 3))
-EOF
+EOF2
 rm /tmp/yolo-smoke.jpg
 ```
 
@@ -177,12 +180,24 @@ cd ~/projects/muse-pi-yolo-mqtt
 # writes config.json with mode 0600
 ```
 
-`config.json` layout: `mqtt` (host/port/username/password/tls/topic_root),
-`cameras` (list; v0.2 has one `camera0` entry — id, name, type, resolution,
-sample_interval, model, imgsz, confidence_threshold, watchlist, publish
-toggles, heartbeat_interval, camera_controls), `buffer` (dir, cap_bytes,
-max_files, jpeg_quality), `web` (enabled, host, port — default 0.0.0.0:8082).
-See `config.json.example` for the full schema.
+`config.json` layout: `model` (service-level, `yolov8n`/`yolov8s`),
+`next_camera_id` (monotonic counter, never reused after a delete),
+`mqtt` (host/port/username/password/tls/topic_root),
+`cameras` (list; each entry — id, name, type [`picamera`|`rtsp`], icon,
+paused, rotate, resolution, sample_interval, imgsz, confidence_threshold,
+watchlist, publish toggles, heartbeat_interval, camera_controls, and for
+RTSP cameras an `rtsp` block: scheme/host/port/path/stream/transport/
+connection_mode/timeout_s/snapshot_url/tls_allow_self_signed/username/
+password), `buffer` (dir, cap_bytes, max_files, jpeg_quality),
+`web` (enabled, host, port — default 0.0.0.0:8082).
+See `config.json.example` for the full schema. The RTSP URL is built
+server-side from the `rtsp` parts at connect time and never stored as a
+full URL; camera passwords are never returned by any API and never logged.
+
+Upgrading from v0.2.x: on first v0.3.0 start, `mqtt.topic_root` ending in
+`YOLOSensor` is rewritten to `Jaeger` (hard cutover, logged loudly), the
+per-camera `model` moves to service level, and `next_camera_id` is derived
+from the existing camera ids. The config is re-saved automatically.
 
 ### Run in the foreground (test)
 
@@ -190,10 +205,11 @@ See `config.json.example` for the full schema.
 cd ~/projects/muse-pi-yolo-mqtt && ./venv/bin/python yolo_sensor.py
 ```
 
-The service opens the camera, loads the model, connects to HiveMQ Cloud over
-TLS, publishes its retained state (Pi config/status, per-camera config/status,
-`{count: 0}` baselines for every watchlist class), then loops:
-capture → inference → publish on per-class change → sleep.
+The service opens the cameras, loads the shared model, connects to HiveMQ
+Cloud over TLS, publishes its retained state (Pi config/status, per-camera
+config/status, `{count: 0}` baselines for every watchlist class), then runs:
+per-camera capture threads feed latest-frame slots; one inference worker
+round-robins the cameras; publish on per-class change.
 
 ### Run as a service (systemd)
 
@@ -208,58 +224,80 @@ The unit runs as `musecell` (no sudo at runtime), restarts on failure.
 
 ### Remote configuration (MQTT)
 
-Publish JSON to `.../camera0/config/set` — e.g. via Node-RED or mosquitto_pub:
+Publish JSON to `.../cameras/camera0/config/set` — e.g. via Node-RED or mosquitto_pub:
 
 | Key | Effect |
 |---|---|
 | `sample_interval` | seconds between captures (float) |
 | `confidence_threshold` | 0–1 (float) |
 | `watchlist` | list of COCO class names |
-| `model` | `n`/`s` (or `yolov8n`/`yolov8s`) — reloads the model live |
 | `buffer_cap_mb` | ring-buffer cap in MB |
 | `heartbeat_interval` | seconds between config republishes |
 | `publish` | `{"classId": bool, "className": bool, "events": bool}` |
 | `camera_controls` | `{"exposure_value": float, "ae_exposure_mode": "Short"/"Normal"/"Long", "exposure_time": µs int, "analogue_gain": float, "ae_enable": bool, "awb_enable": bool}` — see §11 |
 | `imgsz` | YOLO input size (e.g. 640, 416) |
+| `icon` | icon key (`camera`, `door`, `garage`, `driveway`, `garden`, `entrance`, `room`, `board`) |
+| `rotate` | 0/90/180/270 |
+| `name` | rename (names must stay unique) |
+| `paused` | `true`/`false` — pause/resume the camera |
+| `rtsp` | partial `rtsp` block — connection changes restart the capture thread |
 | `capture_now` | `true` triggers an immediate capture cycle |
 
-Changes persist back to `config.json` (mode 0600 preserved) and the camera's
-retained `config` topic is republished. Example:
+`model` is service-level in v0.3.0: a per-camera `model` key in `config/set`
+is ignored with a logged warning. Change the model via the web Settings
+modal (one dropdown, shared by all cameras). Changes persist back to
+`config.json` (mode 0600 preserved) and the camera's retained `config`
+topic is republished. Example:
 
 ```bash
 mosquitto_pub -h <broker> -p 8883 --capath /etc/ssl/certs \
   -u <user> -P <pass> \
-  -t 'Wovyn/RaspberryPi/YOLOSensor/<serial>/camera0/config/set' \
+  -t 'Wovyn/RaspberryPi/Jaeger/<serial>/cameras/camera0/config/set' \
   -m '{"sample_interval": 10}' -q 1
 ```
 
 ## 6. MQTT topic reference
 
-Root: `Wovyn/RaspberryPi/YOLOSensor/<cpu-serial>/` (this Pi: `10000000968c1b38`).
+Root: `Wovyn/RaspberryPi/Jaeger/<cpu-serial>/` (this Pi: `10000000968c1b38`).
 All payloads JSON, timestamps ISO-8601 UTC, QoS 1.
+
+> **Hard cutover in v0.3.0:** the tree moved from
+> `Wovyn/RaspberryPi/YOLOSensor/<serial>/camera{id}/...` to
+> `Wovyn/RaspberryPi/Jaeger/<serial>/cameras/<camera-id>/...`. There is no
+> dual-publish. Node-RED flows referencing the old tree need a one-time
+> update.
 
 ```
 <serial>/
-├── config                  (retained) service identity: version, cameras
+├── config                  (retained) service identity: version, model,
+│                           camera list (ids, names, types, statuses)
 ├── status                  (retained, LWT) online/offline
-└── camera0/
-    ├── config              (retained) camera details + tunables
-    ├── config/set          incoming commands (see §5)
-    ├── status              (retained) camera online/degraded/offline
-    ├── events              scene-change summary {timestamp, counts, image_ref}
-    ├── classId/0 …         (retained) per-class {count, detections, image_ref}
-    ├── className/person …  (retained) same, by name
-    └── images/
-        ├── request         {event_id} → ask for an image
-        └── response        {event_id, timestamp, jpeg_base64, detections}
+└── cameras/
+    └── <camera-id>/       (camera0, camera1, ...; stable IDs, never the name)
+        ├── config          (retained) camera details + tunables: name, type
+        │                   (picamera|rtsp), icon, resolution, access method,
+        │                   sample interval, confidence threshold, watchlist,
+        │                   buffer stats, heartbeat interval, paused
+        ├── config/set      incoming commands (see §5)
+        ├── status          (retained) camera online/degraded/paused/offline
+        ├── events          scene-change summary {timestamp, counts, image_ref}
+        ├── classId/<id>    (retained) per-class {count, detections, image_ref}
+        ├── className/<name> (retained) same, by name
+        └── images/
+            ├── request     {event_id} → ask for an image
+            └── response    {event_id, timestamp, jpeg_base64, detections}
 ```
+
+Camera names stay OUT of topic segments: names have spaces, slashes, unicode,
+and they change; a rename would orphan retained topics and break subscribers.
+Subscribers that need names read the retained Pi-level or per-camera config.
 
 Detection detail: `{confidence, bbox}` with bbox normalized 0–1 `[x1,y1,x2,y2]`.
 A class publishes only when its count changes (including → 0, which clears the
 retained state). In v0.2.0 a change must also persist for 2 consecutive
 inference cycles (confirm-2 debounce) before it publishes — a one-cycle
 flicker around the threshold is swallowed. The ring buffer
-(`buffer/camera0/`) stores the frame for every published change; `image_ref`
+(`buffer/<camera-id>/`) stores the frame for every published change; `image_ref`
 is the buffer event id. Every stored frame has a `<event_id>.json` sidecar
 with the full metadata (camera, timestamp, full counts, detections incl.
 bboxes, model, threshold); `images/response` reads detections from the
@@ -267,20 +305,21 @@ sidecar, so they survive a restart.
 
 ## 7. Node-RED
 
-Selective consumers sharing the one camera + inference:
+Selective consumers sharing the cameras + inference:
 
-- Person/occupancy: `Wovyn/RaspberryPi/YOLOSensor/+/camera0/className/person`
-- Vehicles: `.../camera0/className/car` (or by id: `.../camera0/classId/2`)
-- Simple notifier → Pushover: `.../camera0/events` (counts, no per-class state)
-- Image on demand: publish `{event_id}` to `.../camera0/images/request`,
-  read the JPEG from `.../camera0/images/response`.
+- Person/occupancy: `Wovyn/RaspberryPi/Jaeger/+/cameras/camera0/className/person`
+- Vehicles: `.../cameras/camera0/className/car` (or by id: `.../cameras/camera0/classId/2`)
+- Second camera: `.../cameras/camera1/className/person`
+- Simple notifier → Pushover: `.../cameras/camera0/events` (counts, no per-class state)
+- Image on demand: publish `{event_id}` to `.../cameras/camera0/images/request`,
+  read the JPEG from `.../cameras/camera0/images/response`.
 
 ## 8. Project layout
 
 ```
 muse-pi-yolo-mqtt/
 ├── README.md             this file
-├── DESIGN.md             plan & design (topic tree, multi-camera backlog)
+├── DESIGN.md             plan & design (topic tree, multi-camera design §15)
 ├── CHANGELOG.md          release history
 ├── NOTICE                third-party attributions
 ├── LICENSE               Apache 2.0
@@ -307,8 +346,13 @@ muse-pi-yolo-mqtt/
 | `import picamera2` fails in venv | venv needs `--system-site-packages` to see the apt package |
 | service exits: `missing config.json` | run `setup_config.py` first |
 | `AttributeError: 'NoneType' ... publish` (old) | fixed Oct 13: startup baselines now publish from `on_connect` |
+| RTSP test: `connection refused` | camera not listening on that host/port — check IP, port, and that RTSP is enabled on the camera |
+| RTSP test: `could not open the stream` | usually credentials, path, or stream (main/sub) — verify against the camera's own RTSP URL format |
+| RTSP test: `timed out waiting for a frame` | stream opened but no keyframe arrived — try the other stream, or a longer timeout |
+| RTSP camera stuck `degraded` | capture thread is failing/retrying with backoff; check the log for the (redacted) failure reason |
+| Inference load above 1.0 | the worker cannot keep up — lengthen sample intervals, lower `imgsz`, use yolov8n, or drop a camera (see §12) |
 
-## 10. Web UI (Jaeger, v0.2.0)
+## 10. Web UI (Jaeger, v0.3.0)
 
 Open `http://<pi-ip>:8082` in a browser (no login — LAN-only by design;
 see DESIGN.md §13 for the no-auth decision).
@@ -323,6 +367,16 @@ see DESIGN.md §13 for the no-auth decision).
   filters the events list to that class. Below: the latest-frame
   strip, showing the most recent capture regardless of object
   detections, refreshed on every capture.
+- Cameras panel rows show the icon, name, type, status dot
+  (online/degraded/paused/offline), last image-grab time, last inference
+  time, and grab timing, with per-row pause/resume + edit + delete
+  (the Pi camera has no delete control). The [+] button opens the
+  Add-camera modal; Rescan retries Pi-camera detection. With zero cameras
+  the panel shows an empty state pointing at [+].
+- Inference load indicator: saturation = sum over cameras of (measured
+  inference time / sample interval). Above 1.0 the UI warns that
+  inference is saturated (frames are superseded, per-camera effective
+  intervals grow).
 - Right: events list, newest first, last 25 with infinite scroll for
   older events, with camera, class, and "Filter no object
   detections" (default on) filters. Each row shows camera, local
@@ -334,25 +388,42 @@ see DESIGN.md §13 for the no-auth decision).
   (`GET /api/stream`); a new event refreshes the list and counts,
   a new capture refreshes Latest Frame, a config change refreshes
   cameras/counts/status. No timer polling (uptime ticks locally).
-- Settings (hamburger menu) exposes every tunable: sample interval,
-  confidence threshold, watchlist (COCO checkboxes), model, imgsz,
-  buffer cap, heartbeat, publish toggles, camera controls. UI config
-  writes go through the same apply + persist path as MQTT `config/set`.
+- Add/Edit camera modal (grouped fields): Identity (name, icon);
+  Connection (scheme, host/IP, port, path, stream, transport,
+  connection mode, timeout); Access (credentials on/off, username,
+  password, rtsps-only allow-self-signed); Capture (sample interval,
+  snapshot URL, rotate, start-paused). Test connection fetches a sample
+  image (thumbnail + resolution + codec) without persisting anything;
+  saving connection changes re-runs the test before persisting.
+  On edit, leaving the password blank keeps the stored password.
+- Settings (hamburger menu) exposes tunables: per-camera sample
+  interval, confidence threshold, watchlist (COCO checkboxes), imgsz,
+  buffer cap, heartbeat, publish toggles, camera controls — plus the
+  service-level model dropdown (one model shared by all cameras).
+  UI config writes go through the same apply + persist path as MQTT
+  `config/set`.
 
 API (same server, JSON unless noted):
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/status` | version, MQTT state, uptime, last inference, buffer usage |
-| `GET /api/cameras` | per-camera config + buffer stats |
+| `GET /api/status` | version, service model, inference saturation, MQTT state, uptime, last inference, buffer usage |
+| `GET /api/cameras` | per-camera config + buffer stats (never includes RTSP passwords) |
 | `GET /api/counts?camera=` | current counts for a camera |
 | `GET /api/classes?camera=` | COCO class names + watchlist |
 | `GET /api/events?camera=&class=&hide_empty=&limit=&before=` | paged events (newest first; `hide_empty=1` hides all-zero-count events) |
 | `GET /api/image?camera=&event=` | event JPEG bytes |
 | `GET /api/latest?camera=` | latest frame as base64 JPEG + counts |
-| `GET /api/config?camera=` | camera config |
-| `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set` |
+| `GET /api/config?camera=` | camera config (passwords stripped) |
+| `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set`; `model` + `buffer_cap_mb` are service-level |
 | `POST /api/capture_now` | `{camera_id}` — trigger an immediate cycle |
+| `POST /api/cameras/test` | connection test: `{...camera form, camera_id?}` → `{thumbnail_base64, width, height, codec, grab_seconds, source}`; persists nothing |
+| `POST /api/cameras` | add a camera (tests the connection before persisting) |
+| `PATCH` / `POST /api/cameras/<id>` | edit a camera (connection changes re-test before persisting) |
+| `POST /api/cameras/<id>/pause` | pause (disconnects the RTSP stream) |
+| `POST /api/cameras/<id>/resume` | resume |
+| `DELETE /api/cameras/<id>` | delete (clears retained MQTT topics, keeps buffered images) |
+| `POST /api/cameras/rescan` | retry Pi-camera detection at runtime |
 | `GET /api/stream` | server-sent events: event/frame/config pushes |
 
 ## 11. Camera controls (Picamera2)
@@ -374,6 +445,64 @@ a bad value never crashes the capture loop — previous settings are kept.
 Note: `Brightness`, `Contrast`, `Saturation`, `Sharpness`,
 `AeMeteringMode`, `NoiseReductionMode`, and HDR are NOT Picamera2 controls
 in this context; do not assume they exist.
+
+## 12. RTSP cameras + multi-camera performance
+
+### Adding an RTSP camera
+
+Find the camera's RTSP URL format in its own manual/admin page (typical
+shapes: `/h264/ch1/main/av_stream`, `/Streaming/Channels/101`,
+`/cam/realmonitor?channel=1&subtype=0`). In the Add modal, put the path
+in Path; if the path differs between main and sub streams only by a
+`main`/`sub` token, write `{stream}` in its place and pick the Stream —
+Jaeger substitutes it. Test connection opens the stream (or the snapshot
+URL, when set) with a hard timeout, grabs one frame, and reports the
+actual resolution + codec without persisting anything. Saving re-runs the
+test; a failed test persists nothing.
+
+Connection mode matters because the cameras are NOT dedicated to Jaeger —
+other processes also check in on them:
+- `Persistent` holds one RTSP connection open. Lowest per-frame overhead.
+  Risk: holds one of the camera's stream slots, which can block other apps.
+- `Per-capture` connects, grabs one frame, and disconnects every
+  sample_interval. Frees the camera between captures. Cost: every capture
+  re-negotiates RTSP, waits for a keyframe (1–3 s), and software-decodes
+  video — slower, more jitter, more CPU per frame. Watch the per-camera
+  grab timing in the Cameras panel to judge whether it works for a given
+  camera.
+
+Snapshot URL: if the camera serves a JPEG snapshot endpoint, set it and
+Jaeger polls it instead of holding an RTSP stream (cheaper). RTSP remains
+the fallback when a snapshot fetch fails. Snapshot polling composes with
+either connection mode.
+
+Test-then-add is sequential: the test fully closes its stream before the
+live capture thread opens one, because some cameras allow only 1–2
+concurrent streams. The same stream lock serializes a re-test against a
+live capture thread on edit.
+
+### Performance (honest)
+
+Inference throughput is the global bottleneck (~4.6 s nano @640px cold,
+~1 s warmed). N cameras → per-camera effective interval ≈
+max(configured interval, N × inference_time). Two cameras ≈ 2 s effective
+each warmed at 640px nano. The UI's load indicator (saturation = sum of
+inference_time / sample_interval) is the limit signal: above 1.0 the
+worker cannot keep up, frames are superseded, and effective intervals
+grow. Mitigations: lower `imgsz` (416/320), lengthen sample intervals,
+nano-only, or fewer cameras per Pi. RTSP H.264 decode costs ~10–20% of
+one core at 720p (CPU decode); H.265 costs more — choose H.264 when the
+camera offers it. There is no hard camera limit; the stats are the limit.
+
+### Security notes for RTSP cameras
+
+- Old firmware: treat cameras as untrusted — isolated LAN segment,
+  changed default credentials, no inbound exposure.
+- The web UI has no auth (LAN-only by decision). Camera passwords flow
+  through it in plaintext HTTP; do not add cameras over a network you do
+  not trust until the proxy + auth project lands.
+- Concurrent-stream limits: some cameras allow only 1–2 streams.
+  Persistent mode holds one; per-capture mode exists for sharing.
 
 ## License
 

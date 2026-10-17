@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-16
+
+### Added
+- RTSP camera support (`RTSPCamera` backend via OpenCV `VideoCapture` /
+  `CAP_FFMPEG`): scheme (rtsp/rtsps), host, port, path, stream
+  (mainstream/substream), transport (TCP default / UDP), connection
+  timeout. The test response reports actual resolution + codec, and the
+  modal help text says to choose H.264 when the camera offers it (H.265
+  is expensive to software-decode on a Pi 4).
+- Per-camera connection mode (Scott requirement): `persistent` (hold one
+  RTSP connection open, lowest overhead) or `per-capture` (connect / grab
+  / disconnect every sample_interval, freeing the camera between captures
+  for other apps). The UI shows per-camera grab timing so the user can
+  judge whether per-capture mode works for a given camera.
+- HTTP snapshot-URL path: when a per-camera snapshot URL is set, the
+  capture thread polls it instead of holding an RTSP stream; RTSP is the
+  fallback when the snapshot fetch fails.
+- Reconnect with backoff (2 s, 5 s, 10 s, 30 s cap) in the capture
+  thread, never in the inference path.
+- Camera lifecycle APIs: `POST /api/cameras/test` (hard timeout,
+  downscaled thumbnail + resolution + codec; persists nothing, never
+  echoes/logs credentials, never hangs), `POST /api/cameras` (add),
+  `PATCH`/`POST /api/cameras/<id>` (edit; connection changes re-run the
+  test before persisting), `POST /api/cameras/<id>/pause` + `/resume`
+  (pause disconnects the RTSP stream; status paused; counts freeze),
+  `DELETE /api/cameras/<id>` (clears retained MQTT topics, keeps buffered
+  images), `POST /api/cameras/rescan` (retry Picamera2 init at runtime).
+- Web UI: enabled [+] Add Camera button; Add/Edit modal with grouped
+  fields (Identity: name, icon; Connection: scheme/host/port/path/stream/
+  transport/connection mode/timeout; Access: credentials on/off,
+  username/password, rtsps-only allow-self-signed; Capture: sample
+  interval, snapshot URL, rotate, start-paused) plus Test / Add-Save /
+  Cancel. About 8 original hand-written SVG icons (generic camera, door,
+  garage, driveway, garden/yard, entrance, room, board/chip for the Pi
+  camera). Cameras panel rows show icon, name, type, status dot
+  (online/degraded/paused/offline), last image-grab time, last inference
+  time, grab timing, and per-row pause/resume + edit + delete (no delete
+  control for the Pi camera). Load indicator: saturation = sum over
+  cameras of (measured inference_time / sample_interval); warns above
+  1.0. No-cameras empty state. Rescan action.
+- Camera IDs are auto-generated from a monotonic `next_camera_id` counter
+  (`camera0`, `camera1`, ...) and NEVER reused after a delete. Camera
+  names must be unique (enforced, clear error on duplicate).
+- Multi-camera architecture: one capture thread per camera + per-camera
+  latest-frame slots (one frame each, newest wins, no unbounded queue) +
+  ONE inference worker thread owning the single shared YOLO instance +
+  main thread as supervisor (config/MQTT/shutdown/watchdog). Zero cameras
+  is a valid running state; the service no longer exits when nothing is
+  configured. Watchdog restarts dead capture threads; no fresh frame for
+  ~3x sample_interval + 30 s degrades the camera status with an SSE push.
+  `capture_now` prioritizes a camera.
+
+### Changed
+- **MQTT topic tree: HARD CUTOVER from `Wovyn/RaspberryPi/YOLOSensor/` to
+  `Wovyn/RaspberryPi/Jaeger/`, with a `cameras/<camera-id>/` level**
+  (`Wovyn/RaspberryPi/Jaeger/<serial>/cameras/camera0/...`). No
+  dual-publish. Node-RED flows referencing the old tree need a one-time
+  update. On first v0.3.0 start, a `topic_root` ending in `YOLOSensor` is
+  rewritten to `Jaeger` and the migration is logged loudly.
+- **Model is now service-level** (`config.model`, one shared model for all
+  cameras; Settings shows one model dropdown, not one per camera).
+  Per-camera model keys in old configs are ignored with a logged warning.
+- Per-camera config gains `icon`, `paused`, `rotate`, and an `rtsp` block
+  (scheme/host/port/path/stream/transport/connection_mode/timeout_s/
+  snapshot_url/tls_allow_self_signed/username/password). The RTSP URL is
+  built server-side from parts and never stored as a full URL.
+- Settings modal: model is service-level (one dropdown). Per-camera
+  tunables (interval, threshold, watchlist, publish toggles, camera
+  controls) stay per camera.
+- `/api/status` now also reports the service-level `model` and inference
+  `saturation`. `/api/latest` reads the frame from the camera's slot.
+- Per-camera config payloads no longer carry `model` (service-level now)
+  and never carry the RTSP password (only a `has_password` flag).
+
+### Fixed
+- Model swap: the old model object is explicitly unloaded (`del` +
+  `gc.collect()`) BEFORE the new one loads, so peak memory is one model,
+  not two.
+- Debounce `pending_changes` are cleared on model switch.
+- SSE config push happens AFTER a model swap completes, so the UI
+  confirms the new model (fixes the v0.2.x behavior where Save-time
+  retained config published the pre-swap model).
+- RTSP URLs / credentials never appear in logs, errors, or API
+  responses. Passwords are never returned by any API.
+
+### Security
+- Camera passwords live only in `config.json` (0600), are never returned
+  by any API, never logged, and never stored as part of a full URL. The
+  web UI still has no auth (LAN-only, known); camera passwords flow
+  through it in plaintext HTTP, the same exposure class as everything
+  else the UI does — the proxy + auth project covers it. Do not add
+  cameras over a network you do not trust until the proxy lands.
+
 ## [0.2.1] - 2026-10-16
 
 ### Fixed

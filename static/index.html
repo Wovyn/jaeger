@@ -24,8 +24,14 @@
   <div id="leftCol">
     <section id="camerasSection">
       <h2>Cameras</h2>
+      <div id="loadIndicator" class="load-indicator" title="Inference load = sum over cameras of (measured inference time / sample interval). Above 1.0 the inference worker cannot keep up; frames are superseded and per-camera effective intervals grow.">Inference load: —</div>
       <ul id="cameraList"></ul>
-      <button id="addCameraBtn" disabled title="RTSP cameras coming soon">[+]</button>
+      <div id="noCamerasEmpty" class="empty-state hidden">
+        No cameras configured. Use [+] to add an RTSP camera,
+        or Rescan to look for the Pi camera.
+      </div>
+      <button id="addCameraBtn" title="Add camera">[+]</button>
+      <button id="rescanBtn" class="hidden" title="Retry Pi camera detection without restarting the service">Rescan for Pi camera</button>
     </section>
 
     <section id="countsSection">
@@ -78,6 +84,88 @@
   </div>
 </div>
 
+<div id="cameraModal" class="hidden" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <button id="cameraClose" aria-label="Close">×</button>
+    <h2 id="cameraModalTitle">Add camera</h2>
+    <form id="cameraForm">
+      <fieldset><legend>Identity</legend>
+        <label>Name (must be unique)
+          <input type="text" name="name" required maxlength="64"></label>
+        <label>Icon</label>
+        <div id="iconPicker" class="icon-picker"></div>
+      </fieldset>
+      <fieldset><legend>Connection</legend>
+        <label>Scheme
+          <select name="scheme">
+            <option value="rtsp">rtsp</option>
+            <option value="rtsps">rtsps</option>
+          </select></label>
+        <label>Host / IP
+          <input type="text" name="host" required placeholder="192.168.1.50"></label>
+        <label>Port
+          <input type="number" name="port" value="554" min="1" max="65535"></label>
+        <label>Path
+          <input type="text" name="path" value="/" placeholder="/h264/ch1/{stream}/av_stream">
+          <span class="hint">{stream} is replaced by the Stream choice below. Use the camera's own path when in doubt.</span></label>
+        <label>Stream
+          <select name="stream">
+            <option value="main">Mainstream</option>
+            <option value="sub">Substream</option>
+          </select></label>
+        <label>Transport
+          <select name="transport">
+            <option value="tcp">TCP (default)</option>
+            <option value="udp">UDP</option>
+          </select></label>
+        <label>Connection mode
+          <select name="connection_mode">
+            <option value="persistent">Persistent (hold the stream open)</option>
+            <option value="per-capture">Per-capture (connect / grab / disconnect)</option>
+          </select>
+          <span class="hint">Per-capture frees the camera between grabs for other apps, at the cost of a reconnect + keyframe wait on every capture.</span></label>
+        <label>Connection timeout (seconds)
+          <input type="number" name="timeout_s" value="10" min="1" max="120"></label>
+      </fieldset>
+      <fieldset><legend>Access</legend>
+        <label><input type="checkbox" name="credentials_on"> Credentials (username + password)</label>
+        <label>Username
+          <input type="text" name="username" autocomplete="off"></label>
+        <label>Password
+          <input type="password" name="password" autocomplete="off">
+          <span class="hint">On edit, leaving the password blank keeps the stored password. Passwords are never shown back by the service.</span></label>
+        <label id="selfSignedRow" class="hidden"><input type="checkbox" name="tls_allow_self_signed"> Allow self-signed certificate (rtsps only)</label>
+      </fieldset>
+      <fieldset><legend>Capture</legend>
+        <label>Sample interval (seconds)
+          <input type="number" name="sample_interval" value="5" step="0.1" min="0.5"></label>
+        <label>Snapshot URL (optional)
+          <input type="text" name="snapshot_url" placeholder="http://192.168.1.50/snapshot.jpg">
+          <span class="hint">When set, the camera is polled over HTTP instead of RTSP; RTSP is the fallback when the snapshot fetch fails.</span></label>
+        <label>Rotate
+          <select name="rotate">
+            <option value="0">0°</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select></label>
+        <label><input type="checkbox" name="start_paused"> Start paused</label>
+        <p class="hint">Choose H.264 on the camera when it offers a codec choice: H.265 is expensive to software-decode on a Pi 4.</p>
+      </fieldset>
+      <div id="cameraTestResult" class="test-result hidden">
+        <img id="cameraTestThumb" alt="Connection test thumbnail">
+        <div id="cameraTestMeta"></div>
+      </div>
+      <div id="cameraError" class="error"></div>
+      <div class="form-actions">
+        <button type="button" id="cameraTestBtn">Test connection</button>
+        <button type="submit" id="cameraSaveBtn">Add</button>
+        <button type="button" id="cameraCancelBtn">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="settingsModal" class="hidden" role="dialog" aria-modal="true">
   <div class="modal-box">
     <button id="settingsClose" aria-label="Close">×</button>
@@ -87,7 +175,7 @@
         <input type="number" name="sample_interval" step="0.1" min="0.5"></label>
       <label>Confidence threshold
         <input type="number" name="confidence_threshold" step="0.05" min="0" max="1"></label>
-      <label>Model
+      <label>Model (service-level, shared by all cameras)
         <select name="model"><option value="yolov8n">yolov8n (nano)</option>
         <option value="yolov8s">yolov8s (small)</option></select></label>
       <label>Image size (imgsz)
@@ -135,7 +223,7 @@
     <button id="aboutClose" aria-label="Close">×</button>
     <h2>About Jaeger</h2>
     <p>Jaeger is a small take on Frigate: a Raspberry Pi object-recognition
-    and notification service. The Pi Camera captures frames, YOLOv8 detects
+    and notification service. Cameras capture frames, YOLOv8 detects
     objects, and results publish to MQTT only when the scene changes.
     A bounded ring buffer keeps event images, each with a JSON sidecar
     holding the full object detection metadata.</p>
