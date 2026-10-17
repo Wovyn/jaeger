@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-16
+
+### Fixed
+- Counts panel: "Show zero counts" now defaults to unchecked; when no
+  objects are detected the panel shows a centered one-line message,
+  "No objects detected", instead of an empty list.
+- Counts-panel class filter now actually filters the events list.
+  Root cause (server): the filter matched an event if the class key
+  merely existed in the sidecar `detections` dict — and sidecars list
+  every watchlist class, even empty ones. It now requires a positive
+  count or a non-empty object-detection list for that class.
+- New "Filter no object detections" checkbox (default checked) hides
+  events whose counts are all zero. Events with unknown counts
+  (pre-v0.2.0, no sidecar) stay visible.
+- User-visible text now says "object detections" everywhere instead
+  of bare "detections" (API JSON keys and code identifiers unchanged).
+- Modal bounding boxes now render. Root cause: the overlay code
+  multiplied normalized 0-1 bboxes by image pixels while the SVG
+  viewBox is `0 0 1 1`, pushing every box off-canvas. Coordinates are
+  now used as-is, with viewBox-fraction text offsets.
+- Modal close X now sits above the image (z-index + opaque
+  background) and is clickable.
+- Events list now updates on push via server-sent events
+  (`GET /api/stream`) instead of 5 s timer polling: a new event
+  refreshes the list and counts; a config change refreshes cameras,
+  counts, and status. (A refresh is deferred while the image modal
+  is open, then applied on close.)
+- Latest Frame now refreshes on a per-capture SSE push instead of
+  the timer. Latest Frame is the most recent capture regardless of
+  object detections.
+- Header uptime is now human-readable ("1y 67d 3h 52m 45s": years of
+  365 days / days / hours / minutes / seconds, zero-valued units
+  omitted, seconds always shown) with the service start time on
+  mouseover. The displayed uptime ticks locally every second; the
+  server is not re-polled for it.
+- About popup is now square (`min(90vw, 480px)`, aspect-ratio 1/1)
+  without changing the image modal.
+
+### Added
+- Jaeger logo (white jaeger seabird silhouette on deep navy) in the
+  header and the About popup, plus a favicon (`static/logo.png`).
+
 ## [0.2.0] - 2026-10-14
 
 ### Added

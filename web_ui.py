@@ -1,4 +1,4 @@
-"""Jaeger web UI (v0.2.0): embedded HTTP server for muse-pi-yolo-mqtt.
+"""Jaeger web UI (v0.2.1): embedded HTTP server for muse-pi-yolo-mqtt.
 
 Serves the static UI plus a small JSON API backed by the live YoloSensor
 object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).
@@ -11,6 +11,7 @@ config writer (same path as MQTT config/set).
 import base64
 import json
 import os
+import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -19,14 +20,49 @@ import cv2
 
 VERSION_FALLBACK = "unknown"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-ALLOWED_STATIC = {"index.html", "app.js", "style.css"}
+ALLOWED_STATIC = {"index.html", "app.js", "style.css", "logo.png"}
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".json": "application/json",
+    ".png": "image/png",
 }
 MAX_BODY_BYTES = 65536
+
+
+
+class StreamHub:
+    """Fan-out for server-sent events.
+
+    The sensor publishes a small JSON message whenever something the UI
+    shows changes (new event stored, new frame captured, config changed).
+    Each SSE client gets its own bounded queue; a slow client drops
+    messages (it resyncs on reconnect) instead of blocking the sensor.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._subs = set()
+
+    def subscribe(self):
+        q = queue.Queue(maxsize=32)
+        with self._lock:
+            self._subs.add(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self._lock:
+            self._subs.discard(q)
+
+    def publish(self, payload):
+        with self._lock:
+            subs = list(self._subs)
+        for q in subs:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                pass
 
 
 def _utcnow_iso():
@@ -62,7 +98,9 @@ class JaegerWebServer:
         self.sensor = sensor
         self.host = host
         self.port = port
+        self.hub = StreamHub()
         sensor_ref = sensor
+        hub = self.hub
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -140,6 +178,8 @@ class JaegerWebServer:
                         self._api_image(params)
                     elif path == "/api/latest":
                         self._api_latest(params)
+                    elif path == "/api/stream":
+                        self._api_stream()
                     elif path == "/api/config":
                         self._api_config_get(params)
                     elif path == "/api/classes":
@@ -315,10 +355,19 @@ class JaegerWebServer:
                             "has_metadata": False,
                         })
                 entries.sort(key=lambda e: e["event_id"], reverse=True)
+                if params.get("hide_empty", [None])[0] == "1":
+                    # Hide events positively known to have no objects
+                    # (all counts zero). Events with unknown counts
+                    # (pre-v0.2.0, no sidecar) stay visible.
+                    entries = [e for e in entries
+                               if not (e["counts"]
+                                       and all(v == 0
+                                               for v in e["counts"].values()))]
                 if class_filter:
                     entries = [e for e in entries
                                if e["counts"].get(class_filter, 0) > 0
-                               or class_filter in e["detections"]]
+                               or len(e["detections"].get(class_filter,
+                                                          [])) > 0]
                 if before:
                     entries = [e for e in entries if e["event_id"] < before]
                 page = entries[:limit]
@@ -385,6 +434,39 @@ class JaegerWebServer:
                     "counts": counts,
                 })
 
+            def _api_stream(self):
+                """SSE endpoint: push event/frame/config notifications.
+
+                No Content-Length (HTTP/1.1 stream); a ': heartbeat'
+                comment every 15 s keeps idle connections alive.
+                """
+                q = hub.subscribe()
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(b'data: {"type": "hello"}\n\n')
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    while True:
+                        try:
+                            msg = q.get(timeout=15)
+                            data = ("data: " + json.dumps(msg) + "\n\n"
+                                    ).encode("utf-8")
+                        except queue.Empty:
+                            data = b": heartbeat\n\n"
+                        try:
+                            self.wfile.write(data)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                finally:
+                    hub.unsubscribe(q)
+
             def _api_config_get(self, params):
                 cam = self._camera_or_400(params)
                 if cam is False:
@@ -422,6 +504,13 @@ class JaegerWebServer:
         self._handler = Handler
         self._httpd = _Server((host, port), Handler)
         self._thread = None
+
+    def notify(self, payload):
+        """Push a live-update message to SSE clients. Never raises."""
+        try:
+            self.hub.publish(payload)
+        except Exception:
+            pass
 
     def start(self):
         self._thread = threading.Thread(

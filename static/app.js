@@ -1,4 +1,4 @@
-// Jaeger web UI (v0.2.0) — vanilla JS, no frameworks.
+// Jaeger web UI (v0.2.1) — vanilla JS, no frameworks.
 (function () {
   "use strict";
   var state = {
@@ -10,6 +10,11 @@
     eventsLoading: false,
     classFilter: null,
     cameraFilter: "",
+    hideEmpty: true,
+    lastStatus: null,
+    startedAt: null,
+    eventsStale: false,
+    stream: null,
     modalIndex: -1,
   };
 
@@ -34,7 +39,7 @@
     Object.keys(counts || {}).sort().forEach(function (k) {
       if (counts[k] > 0) parts.push(k + ": " + counts[k]);
     });
-    return parts.length ? parts.join(", ") : "no detections";
+    return parts.length ? parts.join(", ") : "no object detections";
   }
 
   function api(path, options) {
@@ -47,19 +52,53 @@
   }
 
   // ---- status / cameras / counts ----
+  // Human-readable uptime: years (365d) / days / hours / minutes /
+  // seconds, zero-valued units omitted, seconds always shown.
+  // 45 -> "45s"; 863 -> "14m 23s"; 37338765 -> "1y 67d 3h 52m 45s".
+  function fmtDuration(totalSeconds) {
+    var s = Math.max(0, Math.floor(totalSeconds));
+    var years = Math.floor(s / 31536000); s %= 31536000;
+    var days = Math.floor(s / 86400); s %= 86400;
+    var hours = Math.floor(s / 3600); s %= 3600;
+    var minutes = Math.floor(s / 60); s %= 60;
+    var parts = [];
+    if (years) parts.push(years + "y");
+    if (days) parts.push(days + "d");
+    if (hours) parts.push(hours + "h");
+    if (minutes) parts.push(minutes + "m");
+    parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  // Re-render the status line from the last fetched status. Fetch-free,
+  // so the 1 s uptime tick below never polls the server. Uptime is
+  // recomputed from the service start time, so it keeps ticking.
+  function renderStatusLine() {
+    var s = state.lastStatus;
+    if (!s) return;
+    var up = state.startedAt
+      ? fmtDuration((Date.now() - new Date(state.startedAt).getTime()) / 1000)
+      : Math.round(s.uptime_seconds) + "s";
+    $("statusText").textContent =
+      "up " + up +
+      (s.last_cycle_seconds != null
+        ? " · last inference " + s.last_cycle_seconds + "s" : "");
+    $("statusText").title = state.startedAt
+      ? "Started " + fmtLocal(state.startedAt) : "";
+    $("bufferUsage").textContent =
+      "Buffer: " + fmtBytes(s.buffer.bytes) + " / " +
+      fmtBytes(s.buffer.cap_bytes) + " (" + s.buffer.files + " images)";
+  }
+
   function loadStatus() {
     return api("/api/status").then(function (s) {
+      state.lastStatus = s;
+      state.startedAt = s.started_at || null;
       $("version").textContent = "v" + s.version;
       var dot = $("statusDot");
       dot.className = "dot " + (s.mqtt_connected ? "online" : "offline");
       dot.title = s.mqtt_connected ? "MQTT connected" : "MQTT disconnected";
-      $("statusText").textContent =
-        "up " + Math.round(s.uptime_seconds) + "s" +
-        (s.last_cycle_seconds != null
-          ? " · last inference " + s.last_cycle_seconds + "s" : "");
-      $("bufferUsage").textContent =
-        "Buffer: " + fmtBytes(s.buffer.bytes) + " / " +
-        fmtBytes(s.buffer.cap_bytes) + " (" + s.buffer.files + " images)";
+      renderStatusLine();
     }).catch(function () { /* keep last good state */ });
   }
 
@@ -116,6 +155,7 @@
         $("countsCamera").textContent = "— " + r.camera_id;
         var list = $("countsList");
         list.innerHTML = "";
+        var shown = 0;
         var showZero = $("zeroToggle").checked;
         Object.keys(r.counts).sort().forEach(function (name) {
           var count = r.counts[name];
@@ -128,7 +168,9 @@
             setClassFilter(name);
           });
           list.appendChild(row);
+          shown++;
         });
+        $("countsEmpty").classList.toggle("hidden", shown > 0);
       }).catch(function () { /* keep last good state */ });
   }
 
@@ -149,6 +191,7 @@
     var q = "/api/events?limit=25";
     if (state.cameraFilter) q += "&camera=" + encodeURIComponent(state.cameraFilter);
     if (state.classFilter) q += "&class=" + encodeURIComponent(state.classFilter);
+    if (state.hideEmpty) q += "&hide_empty=1";
     if (!reset && state.eventsCursor) {
       q += "&before=" + encodeURIComponent(state.eventsCursor);
     }
@@ -196,30 +239,26 @@
   }
 
   // ---- modal ----
+  // Bboxes are normalized 0-1 and the SVG viewBox is "0 0 1 1", so the
+  // coordinates are used as-is. Text offsets are viewBox fractions;
+  // the text font-size comes from CSS (0.018 user units).
   function renderBboxes() {
     var svg = $("modalSvg");
     svg.innerHTML = "";
-    var img = $("modalImg");
     var e = state.events[state.modalIndex];
     if (!e || !e.detections) return;
-    var w = img.naturalWidth || 0, h = img.naturalHeight || 0;
-    if (!w || !h) return;
-    svg.setAttribute("viewBox", "0 0 " + w + " " + h);
     Object.keys(e.detections).forEach(function (name) {
       e.detections[name].forEach(function (d) {
         var b = d.bbox || [0, 0, 0, 0];
-        var x = b[0] * w, y = b[1] * h,
-            bw = (b[2] - b[0]) * w, bh = (b[3] - b[1]) * h;
         var rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        rect.setAttribute("x", x);
-        rect.setAttribute("y", y);
-        rect.setAttribute("width", bw);
-        rect.setAttribute("height", bh);
+        rect.setAttribute("x", b[0]);
+        rect.setAttribute("y", b[1]);
+        rect.setAttribute("width", b[2] - b[0]);
+        rect.setAttribute("height", b[3] - b[1]);
         svg.appendChild(rect);
         var text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        text.setAttribute("x", x + 2);
-        text.setAttribute("y", y + Math.max(14, h * 0.025));
-        text.setAttribute("font-size", Math.max(12, h * 0.022));
+        text.setAttribute("x", b[0] + 0.004);
+        text.setAttribute("y", Math.min(b[1] + 0.028, 0.985));
         text.textContent = name + " " + d.confidence;
         svg.appendChild(text);
       });
@@ -241,6 +280,10 @@
   function closeModal() {
     $("modal").classList.add("hidden");
     state.modalIndex = -1;
+    if (state.eventsStale) {
+      state.eventsStale = false;
+      loadEvents(true);
+    }
   }
   function modalStep(d) {
     var n = state.modalIndex + d;
@@ -386,6 +429,10 @@
     });
     $("settingsForm").addEventListener("submit", submitSettings);
     $("zeroToggle").addEventListener("change", loadCounts);
+    $("hideEmptyToggle").addEventListener("change", function () {
+      state.hideEmpty = $("hideEmptyToggle").checked;
+      loadEvents(true);
+    });
     $("captureNowBtn").addEventListener("click", function () {
       if (!state.selectedCamera) return;
       api("/api/capture_now", {
@@ -429,8 +476,47 @@
       loadLatest();
     });
     loadEvents(true);
-    setInterval(function () { loadStatus(); loadCounts(); loadLatest(); }, 5000);
-    setInterval(function () { loadCameras(); }, 15000);
+    startStream();
+    // Uptime tick only: re-renders from the last fetched status, no fetch.
+    setInterval(renderStatusLine, 1000);
+  }
+
+  // Live updates via server-sent events (no polling). The server pushes
+  // on every new event, every new capture, and every config change.
+  function startStream() {
+    var es = new EventSource("/api/stream");
+    state.stream = es;
+    es.onopen = function () {
+      loadStatus();
+      loadCameras();
+      loadCounts();
+      loadEvents(true);
+      loadLatest();
+    };
+    es.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === "event") {
+        // Don't yank the list out from under an open image modal;
+        // refresh once the modal closes instead.
+        if ($("modal").classList.contains("hidden")) {
+          loadEvents(true);
+        } else {
+          state.eventsStale = true;
+        }
+        loadCounts();
+        loadStatus();
+      } else if (msg.type === "frame") {
+        loadLatest();
+        loadCameras();
+      } else if (msg.type === "config") {
+        loadCameras();
+        loadCounts();
+        loadStatus();
+      }
+      // "hello" needs nothing: onopen already resynced.
+    };
+    es.onerror = function () { /* EventSource auto-reconnects; onopen resyncs */ };
   }
 
   document.addEventListener("DOMContentLoaded", init);

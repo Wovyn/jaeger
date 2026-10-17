@@ -4,6 +4,7 @@ header { display: flex; align-items: center; gap: 0.6em; padding: 0.5em 1em;
   background: #1d2733; color: #fff; position: sticky; top: 0; z-index: 10; }
 header h1 { font-size: 1.4em; margin: 0; flex: 1; }
 header h1 span { font-size: 0.6em; font-weight: normal; color: #9fb3c8; }
+.header-logo { width: 32px; height: 32px; vertical-align: middle; margin-right: 0.3em; }
 .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 .dot.online { background: #3c3; }
 .dot.offline { background: #c33; }
@@ -35,6 +36,7 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 #countsList .count-row:hover span { background: #eef4ff; }
 #countsList .count-name { text-align: left; }
 #countsList .count-value { text-align: right; font-variant-numeric: tabular-nums; }
+.counts-empty { text-align: center; color: #555; padding: 0.8em 0; }
 #latestImg { width: 100%; border-radius: 6px; background: #222; min-height: 120px; }
 #latestMeta { font-size: 0.85em; color: #555; margin-top: 0.4em; }
 .filters { display: flex; gap: 0.8em; align-items: center; flex-wrap: wrap; margin-bottom: 0.8em; }
@@ -53,8 +55,12 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
   display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal-box { background: #fff; border-radius: 8px; padding: 1.2em; max-width: 92vw;
   max-height: 92vh; overflow: auto; position: relative; }
+.about-box { width: min(90vw, 480px); aspect-ratio: 1 / 1; }
+.about-logo { display: block; width: 96px; height: 96px; margin: 0 auto 0.6em; }
 #modalClose, #settingsClose, #aboutClose { position: absolute; top: 0.4em; right: 0.6em;
-  font-size: 1.4em; background: none; border: none; cursor: pointer; }
+  font-size: 1.4em; background: none; border: none; cursor: pointer; z-index: 10; }
+#modalClose { background: rgba(0,0,0,0.6); color: #fff; border-radius: 50%;
+  width: 1.6em; height: 1.6em; line-height: 1.6em; text-align: center; padding: 0; }
 .modal-img-wrap { position: relative; line-height: 0; }
 #modalImg { max-width: 86vw; max-height: 72vh; display: block; }
 #modalSvg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }

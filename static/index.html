@@ -4,11 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Jaeger</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <h1>Jaeger <span id="version"></span></h1>
+  <h1><img src="/static/logo.png" class="header-logo" alt="Jaeger logo"> Jaeger <span id="version"></span></h1>
   <span id="statusDot" class="dot offline" title="MQTT disconnected"></span>
   <span id="statusText"></span>
   <button id="menuBtn" aria-label="Menu">&#9776;</button>
@@ -29,9 +30,10 @@
 
     <section id="countsSection">
       <h2>Counts <span id="countsCamera"></span></h2>
-      <label><input type="checkbox" id="zeroToggle" checked> Show zero counts</label>
+      <label><input type="checkbox" id="zeroToggle"> Show zero counts</label>
       <button id="captureNowBtn">Capture now</button>
       <ul id="countsList"></ul>
+  <div id="countsEmpty" class="counts-empty hidden">No objects detected</div>
     </section>
 
     <section id="latestSection">
@@ -48,6 +50,7 @@
         <label>Camera
           <select id="cameraFilter"><option value="">All cameras</option></select>
         </label>
+        <label><input type="checkbox" id="hideEmptyToggle" checked> Filter no object detections</label>
         <span id="classFilterChip" class="hidden">Class: <b id="classFilterName"></b>
           <button id="clearClassFilter">×</button></span>
         <button id="refreshEventsBtn">Refresh</button>
@@ -127,14 +130,15 @@
 </div>
 
 <div id="aboutModal" class="hidden" role="dialog" aria-modal="true">
-  <div class="modal-box">
+  <div class="modal-box about-box">
+    <img src="/static/logo.png" class="about-logo" alt="Jaeger logo">
     <button id="aboutClose" aria-label="Close">×</button>
     <h2>About Jaeger</h2>
     <p>Jaeger is a small take on Frigate: a Raspberry Pi object-recognition
     and notification service. The Pi Camera captures frames, YOLOv8 detects
     objects, and results publish to MQTT only when the scene changes.
     A bounded ring buffer keeps event images, each with a JSON sidecar
-    holding the full detection metadata.</p>
+    holding the full object detection metadata.</p>
     <p>Wovyn R&amp;D project. Apache 2.0.</p>
   </div>
 </div>

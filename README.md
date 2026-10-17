@@ -13,7 +13,7 @@ Wovyn R&D project. Apache 2.0.
 v0.1.0 implemented, tested, and pushed Oct 14, 2026 (single Pi Camera).
 v0.2.0 (Jaeger web UI) built and committed Oct 14, 2026, running live: web UI on port 8082,
 per-image JSON metadata sidecars, confirm-2 change debounce, and Picamera2
-camera controls (see DESIGN.md §13). Live testing in progress; feedback may fold into follow-up commits. The systemd unit is written but not
+camera controls (see DESIGN.md §13). Live testing produced feedback now addressed as v0.2.1 committed Oct 16, 2026 (testing-feedback fixes + logo; see DESIGN.md §14). The systemd unit is written but not
 enabled. See DESIGN.md for the plan, including the multi-camera/RTSP backlog.
 
 ## Hardware
@@ -313,19 +313,27 @@ muse-pi-yolo-mqtt/
 Open `http://<pi-ip>:8082` in a browser (no login — LAN-only by design;
 see DESIGN.md §13 for the no-auth decision).
 
-- Header: Jaeger + version, MQTT status dot, hamburger menu (Settings,
-  About, buffer usage).
+- Header: Jaeger logo + version, MQTT status dot, human-readable
+  uptime (service start time on mouseover), hamburger menu (Settings,
+  About, buffer usage). Favicon is the Jaeger logo.
 - Left: cameras list (click a camera to select it) and the counts panel
   for the selected camera. Counts rows are `name: count`, aligned;
-  the show-zero toggle hides zero counts; clicking a row filters the
-  events list to that class. Below: the latest-frame strip, showing
-  the most recent capture even when nothing was detected.
+  the show-zero toggle (default off) hides zero counts, and an empty
+  result shows a centered "No objects detected" line; clicking a row
+  filters the events list to that class. Below: the latest-frame
+  strip, showing the most recent capture regardless of object
+  detections, refreshed on every capture.
 - Right: events list, newest first, last 25 with infinite scroll for
-  older events. Each row shows camera, local time (UTC on mouseover),
-  objects + counts, and a thumbnail. Click a row for the full-size
+  older events, with camera, class, and "Filter no object
+  detections" (default on) filters. Each row shows camera, local
+  time (UTC on mouseover), objects + counts, and a thumbnail. Click a row for the full-size
   image in a modal; the bounding-box overlay toggle (default on) draws
   boxes from the sidecar metadata. Esc closes the modal; arrow keys
   step through events.
+- Live updates: the UI subscribes to server-sent events
+  (`GET /api/stream`); a new event refreshes the list and counts,
+  a new capture refreshes Latest Frame, a config change refreshes
+  cameras/counts/status. No timer polling (uptime ticks locally).
 - Settings (hamburger menu) exposes every tunable: sample interval,
   confidence threshold, watchlist (COCO checkboxes), model, imgsz,
   buffer cap, heartbeat, publish toggles, camera controls. UI config
@@ -339,12 +347,13 @@ API (same server, JSON unless noted):
 | `GET /api/cameras` | per-camera config + buffer stats |
 | `GET /api/counts?camera=` | current counts for a camera |
 | `GET /api/classes?camera=` | COCO class names + watchlist |
-| `GET /api/events?camera=&class=&limit=&before=` | paged events (newest first) |
+| `GET /api/events?camera=&class=&hide_empty=&limit=&before=` | paged events (newest first; `hide_empty=1` hides all-zero-count events) |
 | `GET /api/image?camera=&event=` | event JPEG bytes |
 | `GET /api/latest?camera=` | latest frame as base64 JPEG + counts |
 | `GET /api/config?camera=` | camera config |
 | `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set` |
 | `POST /api/capture_now` | `{camera_id}` — trigger an immediate cycle |
+| `GET /api/stream` | server-sent events: event/frame/config pushes |
 
 ## 11. Camera controls (Picamera2)
 

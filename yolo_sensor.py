@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jaeger (muse-pi-yolo-mqtt) service v0.2.0.
+"""Jaeger (muse-pi-yolo-mqtt) service v0.2.1.
 
 Captures frames from configured cameras, runs YOLOv8 object detection, and
 publishes per-class counts/details to MQTT only when the scene changes.
@@ -29,7 +29,7 @@ try:
 except ImportError:  # web UI optional; the sensor must keep running
     JaegerWebServer = None
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "config.json")
 EVENT_REGISTRY_MAX = 200
@@ -368,6 +368,19 @@ class YoloSensor:
                 self.publish_baseline(cam, cid)
 
     # ---- incoming commands ----
+    def notify_stream(self, payload):
+        """Push a live-update notification to web UI SSE clients.
+
+        Never raises and never blocks inference: a web failure must
+        not take down the sensor.
+        """
+        try:
+            ws = self.web_server
+            if ws is not None:
+                ws.notify(payload)
+        except Exception:
+            pass
+
     def drain_messages(self):
         while True:
             try:
@@ -468,6 +481,7 @@ class YoloSensor:
             print(f"[{cam['id']}] config updated: {cmd}", flush=True)
             self.save_config()
             self.publish_camera_config(cam)
+            self.notify_stream({"type": "config", "camera_id": cam["id"]})
 
     def handle_image_request(self, cam, payload):
         event_id = payload.get("event_id", "") if isinstance(payload, dict) else ""
@@ -528,6 +542,8 @@ class YoloSensor:
         cam["latest_frame"] = frame
         ts = utcnow_iso()
         cam["last_capture_at"] = ts
+        self.notify_stream({"type": "frame", "camera_id": cam["id"],
+                            "timestamp": ts})
         results = cam["model_obj"](frame, classes=cam["watch_ids"],
                                    conf=cfg.get("confidence_threshold", 0.5),
                                    imgsz=cfg.get("imgsz", 640),
@@ -587,6 +603,8 @@ class YoloSensor:
             "threshold": cfg.get("confidence_threshold", 0.5),
         }
         self.store_frame(cam, event_id, frame, event_data)
+        self.notify_stream({"type": "event", "event_id": event_id,
+                            "camera_id": cam["id"], "timestamp": ts})
         for cid in changed:
             cam["last_counts"][cid] = counts[cid]
             name = cam["id_to_name"][cid]

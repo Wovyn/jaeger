@@ -1,6 +1,6 @@
 # muse-pi-yolo-mqtt — Plan & Design (v0.1, v0.2.0)
 
-Status: v0.1.0 built and pushed Oct 14, 2026; v0.2.0 built and committed Oct 14, 2026, live testing in progress (topic tree revised Oct 13; multi-camera design Oct 13).
+Status: v0.1.0 built and pushed Oct 14, 2026; v0.2.0 built and committed Oct 14, 2026, live testing in progress; v0.2.1 (UI fixes from testing feedback) built and committed Oct 16, 2026 (topic tree revised Oct 13; multi-camera design Oct 13).
 
 ## 1. Overview
 
@@ -255,3 +255,70 @@ published class change occurs for that camera (no publish → no store).
 - Camera controls (Muse experiments; Google AI Mode conversation Oct 14): Picamera2 AEC/AGC on by default. Expose ExposureValue (EV compensation), AeExposureMode (Short/Normal/Long), manual ExposureTime + AnalogueGain, and AeEnable/AwbEnable lock. Test AeExposureMode Long for dark-room noise/flap reduction. Brightness/Contrast/Saturation/Sharpness/AeMeteringMode/NoiseReductionMode/HDR were NOT in that conversation as Picamera2 controls; do not assume they exist.
 - Build order: sidecars + paired eviction; debounce; web thread + API; static UI; camera controls; docs. Commit as v0.2.0 on Scott go-ahead.
 - Oct 14 housekeeping: test buffer JPGs dropped (1953 files, 395 MB, all flap test data). v0.1.0 pushed by Scott Oct 14 (b237fce on origin/main, in sync).
+
+## 14. v0.2.1 - UI fixes (Scott testing feedback, Oct 15, 2026; committed Oct 16, 2026)
+
+All items from Scott's Oct 15 testing pass over v0.2.0. No behavior
+change to MQTT, inference, or the ring buffer except where noted.
+
+- Counts panel: "Show zero counts" defaults to UNCHECKED. When no rows
+  render (all counts zero, or no counts), the panel shows a centered
+  one-line "No objects detected" message instead of an empty list.
+- Class filter bug (events list not filtered): root cause was
+  server-side in `/api/events`. The filter matched an event if the
+  class key merely existed in the sidecar `detections` dict — and
+  sidecars list every watchlist class, even with empty lists. Fixed:
+  an event matches a class filter only with a positive count for that
+  class or a non-empty object-detection list for it. Camera + class +
+  no-object-detections filters combine in one events fetch.
+- "Filter no object detections" checkbox (default CHECKED) hides
+  events whose counts are all zero (`hide_empty=1` on `/api/events`).
+  Events with unknown counts (pre-v0.2.0 JPGs, no sidecar) stay
+  visible: the filter hides only events positively known to be empty.
+- Terminology rule: user-visible text says "object detections", never
+  bare "detections". API JSON keys (`detections`) and code identifiers
+  are unchanged.
+- Modal bounding boxes: root cause was the overlay code multiplying
+  normalized 0-1 bboxes by image pixels while the SVG viewBox is
+  `0 0 1 1`, pushing every box off-canvas. The SVG CSS was already
+  written for 0-1 coordinates (font-size/stroke in viewBox units);
+  the JS now uses the normalized coordinates as-is, with
+  viewBox-fraction text offsets.
+- Modal close X: root cause was stacking — the button (earlier
+  sibling, z-index auto) painted under `.modal-img-wrap` (later
+  positioned sibling). Fixed with z-index + an opaque dark circular
+  background on the image-modal close button so it sits above the
+  picture and is clickable. Settings/About close buttons get the
+  z-index too.
+- Live updates via server-sent events (replaces timer polling):
+  `GET /api/stream` (`text/event-stream`, `: heartbeat` comments
+  every 15 s). `StreamHub` fan-out in web_ui.py: each SSE client gets
+  its own bounded queue (32); a slow client drops messages and
+  resyncs on reconnect instead of blocking the sensor. Push points
+  in yolo_sensor.py via `notify_stream()` (never raises, never
+  blocks inference): `{"type": "frame"}` after every capture,
+  `{"type": "event"}` after an event is stored, `{"type": "config"}`
+  after a config change is applied. Client (`EventSource`):
+  on open -> full resync; `event` -> refresh events list + counts +
+  status; `frame` -> refresh Latest Frame + cameras (keeps the
+  per-camera last-capture time fresh); `config` -> refresh cameras +
+  counts + status. A list refresh is deferred while the image modal
+  is open (flagged stale, applied on close) so the list is not yanked
+  out from under an inspected image.
+- Latest Frame definition (documented): the most recent capture
+  regardless of object detections, refreshed on every capture push.
+  (The sensor already updated `latest_frame` on every capture in
+  v0.2.0; only the client refresh was timer-based.)
+- Uptime format rule: years (365 days) / days / hours / minutes /
+  seconds, zero-valued units omitted, seconds always shown
+  (`0s` if all zero). Examples: `45s`, `14m 23s`,
+  `1y 67d 3h 52m 45s`. Mouseover (`title`) shows the service start
+  time. The displayed uptime ticks locally every second from the
+  fetched `started_at` — the server is not re-polled for it.
+- About popup: square sizing (`width: min(90vw, 480px)`,
+  `aspect-ratio: 1 / 1`, scroll on overflow) via its own
+  `.about-box` class. The image modal keeps fitting its image.
+- Logo/favicon: `static/logo.png` (1600x1600 PNG, white jaeger
+  seabird silhouette on deep navy, matching the header) is served
+  via the static allowlist and wired in as the header logo
+  (~32 px), the About popup logo, and the favicon.
