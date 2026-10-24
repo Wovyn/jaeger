@@ -24,7 +24,7 @@ import cv2
 
 VERSION_FALLBACK = "unknown"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-ALLOWED_STATIC = {"index.html", "app.js", "style.css", "logo.png"}
+ALLOWED_STATIC = {"index.html", "app.js", "style.css", "logo.png", "wovyn-logo.png"}
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -192,6 +192,8 @@ class JaegerWebServer:
                         self._api_image(params)
                     elif path == "/api/latest":
                         self._api_latest(params)
+                    elif path == "/api/latest_meta":
+                        self._api_latest_meta(params)
                     elif path == "/api/stream":
                         self._api_stream()
                     elif path == "/api/config":
@@ -344,7 +346,15 @@ class JaegerWebServer:
                 if cam is False:
                     return
                 if cam is None:
-                    self._send_error_json(404, "no cameras configured")
+                    # No cameras yet (e.g. Add flow on a fresh setup):
+                    # fall back to the service-level model names so the
+                    # Detection tab's watchlist can still be built.
+                    names = sorted(set(sensor_ref.name_to_id.keys()))
+                    self._send_json({
+                        "camera_id": None,
+                        "classes": names,
+                        "watchlist": [],
+                    })
                     return
                 names = sorted(set(cam["id_to_name"].values()))
                 self._send_json({
@@ -358,6 +368,7 @@ class JaegerWebServer:
                 cam_id = params.get("camera", [None])[0]
                 class_filter = params.get("class", [None])[0]
                 before = params.get("before", [None])[0]
+                after = params.get("after", [None])[0]
                 try:
                     limit = int(params.get("limit", ["25"])[0])
                 except ValueError:
@@ -435,6 +446,18 @@ class JaegerWebServer:
                                                           [])) > 0]
                 if before:
                     entries = [e for e in entries if e["event_id"] < before]
+                if after:
+                    # Newer-than filter for incremental prepend: event_ids
+                    # are zero-padded YYYYMMDDTHHMMSSZ_xxxx, so
+                    # lexicographic order is chronological order.
+                    entries = [e for e in entries if e["event_id"] > after]
+                    page = entries[:limit]
+                    self._send_json({
+                        "events": page,
+                        "has_more": False,
+                        "next_before": None,
+                    })
+                    return
                 page = entries[:limit]
                 has_more = len(entries) > limit
                 self._send_json({
@@ -498,6 +521,22 @@ class JaegerWebServer:
                     "jpeg_base64": base64.b64encode(
                         buf.tobytes()).decode("ascii"),
                     "counts": counts,
+                })
+            def _api_latest_meta(self, params):
+                cam = self._camera_or_400(params)
+                if cam is False:
+                    return
+                if cam is None:
+                    self._send_error_json(404, "no cameras configured")
+                    return
+                self._send_json({
+                    "camera_id": cam["id"],
+                    "timestamp": cam.get("last_capture_at"),
+                    "threshold": cam["cfg"].get("confidence_threshold", 0.5),
+                    "display_floor": getattr(sensor_ref, "display_floor",
+                                             0.25),
+                    "detections": cam.get("latest_dets", {}),
+                    "weak_detections": cam.get("latest_weak", []),
                 })
 
             def _api_stream(self):

@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-10-16
 
 ### Added
+- Asymmetric debounce: a disappearance (class count dropping to zero)
+  now needs `disappear_confirm_cycles` consecutive empty inference cycles
+  (per-camera setting, default 4, valid 2-20) before the {count: 0} is
+  published, the event stored, or the image buffered. Appearances and other
+  count changes keep the existing confirm-2. While a disappearance is
+  pending, the counts panel, /api/counts and MQTT keep the last confirmed
+  count. (Rationale: threshold-boundary flapping on camera2 "Paducah -
+  Garage" - a parked car oscillating 1/0 with confidences 0.50-0.58 vs a
+  0.5 threshold.)
+- Weak (sub-threshold) detections listed under the Latest Frame panel:
+  inference now runs at conf=min(threshold, 0.25) so boxes below the
+  camera threshold but at/above 0.25 reach the code; they are shown as
+  muted "(weak)" text under the Latest Frame image (and via the new
+  GET /api/latest_meta endpoint). Counts, events, MQTT publishing,
+  buffer storage and debounce use confirmed detections only - behavior
+  identical to before; weak boxes are never stored or published.
 - RTSP camera support (`RTSPCamera` backend via OpenCV `VideoCapture` /
   `CAP_FFMPEG`): scheme (rtsp/rtsps), host, port, path, stream
   (mainstream/substream), transport (TCP default / UDP), connection
@@ -59,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~3x sample_interval + 30 s degrades the camera status with an SSE push.
   `capture_now` prioritizes a camera.
 
+- Event modal: new "Download" button saves the full-size event image via
+  the browser download UI (an anchor with the download attribute, same-origin
+  /api/image URL). Default filename is "{camera name}-{YYYYMMDD-HHMMSS}.jpg"
+  (event timestamp in browser-local time; the camera name is sanitized of
+  filesystem-illegal characters). Whether a Save As dialog appears or the
+  file downloads silently depends on the browser's "ask where to save" setting.
+
 ### Changed
 - **MQTT topic tree: HARD CUTOVER from `Wovyn/RaspberryPi/YOLOSensor/` to
   `Wovyn/RaspberryPi/Jaeger/`, with a `cameras/<camera-id>/` level**
@@ -80,8 +103,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `saturation`. `/api/latest` reads the frame from the camera's slot.
 - Per-camera config payloads no longer carry `model` (service-level now)
   and never carry the RTSP password (only a `has_password` flag).
+- About dialog rewritten with Scott's text and now shows the Wovyn logo
+  above the closing line; the dialog is widened and content-sized so the
+  full text and both logos fit without scrolling on a desktop viewport.
+
 
 ### Fixed
+- Header inference time / load no longer goes stale between detected changes: status now refreshes on every capture (SSE frame push).
+- Inference-load alert in the Cameras panel is now a centered bold white-on-red bar when saturated.
 - Model swap: the old model object is explicitly unloaded (`del` +
   `gc.collect()`) BEFORE the new one loads, so peak memory is one model,
   not two.
@@ -91,6 +120,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retained config published the pre-swap model).
 - RTSP URLs / credentials never appear in logs, errors, or API
   responses. Passwords are never returned by any API.
+- Per-capture grab timing is split into open vs keyframe-wait phases
+  (last_grab_open_seconds / last_grab_wait_seconds in the camera
+  config payload, shown in the Cameras panel). FFmpeg stream probing
+  is capped (analyzeduration / probesize 0.5 s / 500 KB,
+  pipe-separated option pairs as OpenCV expects) so the open
+  phase cannot stall on slow cameras.
+- Events list no longer flashes on every new event: the client
+  fetches only events newer than the newest shown (new /api/events
+  `after` param) and prepends the new rows instead of clearing and
+  rebuilding the whole list. Full reload stays only for initial load,
+  filter changes, SSE reconnect, and manual refresh.
+- Add/Edit camera modal redesigned to a two-column grouped layout with
+  a live masked resolved-URL preview.
+- Camera modals rebuilt as two tabbed modals: RTSP (Connection |
+  Detection) and Pi (Camera | Detection), 1000 px, 44 px tab bar.
+  Both share ONE Detection tab implementation (single builder +
+  collect/validate, moved between modals, no duplicate IDs): sample
+  every, confidence slider, image size, heartbeat, publish toggles,
+  grouped watchlist chips (12 designer groups + Other), and a note
+  naming the live service model with a link to Service settings.
+  Add keeps the service default watchlist.
+- Service settings modal is system-wide only: detection model
+  (yolov8n / yolov8s) + image history limit with a live In-use bar
+  (buffer bytes / cap from /api/status). The old per-camera Settings
+  fields are gone; they live in the Detection tab now. The hamburger
+  Settings entry opens it with no camera required.
+- Error dots: on Save, every tab containing an invalid field shows a
+  small red dot and the first error tab opens; server-side errors map
+  the same way. Dots clear as errors are fixed.
+- Pi Camera tab: read-only Sensor card (detected model, port, current
+  resolution), Capture (rotate, start paused), white balance (AWB),
+  Exposure with Auto/Manual segmented control, live preview frame
+  (Refresh via capture_now), and Test capture with a result line.
+  Auto sends explicit nulls for exposure_time/analogue_gain so the
+  server-side merge actually clears the stored manual values (the old
+  merge retained them), and Manual saves ae_enable=false + shutter +
+  gain; the modal reopens in the mode the stored values imply.
+- Pi camera is now editable via PATCH /api/cameras/<id> (identity +
+  detection + camera controls); it still cannot be deleted. RTSP add
+  and edit now apply the Detection-tab fields as well.
+- /api/classes falls back to the service-level model names when no
+  cameras exist, so the Add flow can build the watchlist on a fresh
+  setup.
+- Detection tab layout: "Confirm absent (cycles)" moved to its own row
+  below Image size / Heartbeat - three 150px fields no longer overflow
+  the left column. Number inputs inside suffix wrappers (Sample every,
+  Heartbeat) now size to content instead of taking the full 36px field
+  height, which overflowed the 36px wrapper's 34px content box.
+
 
 ### Security
 - Camera passwords live only in `config.json` (0600), are never returned

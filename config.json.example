@@ -9,6 +9,7 @@
     {
       "camera_controls": {},
       "confidence_threshold": 0.5,
+      "disappear_confirm_cycles": 4,
       "heartbeat_interval": 600,
       "icon": "board",
       "id": "camera0",
@@ -40,6 +41,7 @@
     },
     {
       "confidence_threshold": 0.5,
+      "disappear_confirm_cycles": 4,
       "heartbeat_interval": 600,
       "icon": "garage",
       "id": "camera1",

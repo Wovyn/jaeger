@@ -151,6 +151,12 @@
     });
   }
 
+  function grabSplit(c) {
+    if (c.last_grab_open_seconds == null || c.last_grab_wait_seconds == null) return "";
+    return " open " + fmtSecs(c.last_grab_open_seconds) +
+      " + keyframe " + fmtSecs(c.last_grab_wait_seconds);
+  }
+
   function renderCameras() {
     var list = $("cameraList");
     list.innerHTML = "";
@@ -173,7 +179,7 @@
         escHtml(c.type) + " · " + escHtml(c.resolution.join("x")) + " · " +
         escHtml(status) + (c.paused ? " (paused)" : "") +
         "<br>last grab: " + fmtLocal(c.last_grab_at) +
-        " (" + fmtSecs(c.last_grab_seconds) + ") · last inference: " +
+        " (" + fmtSecs(c.last_grab_seconds) + grabSplit(c) + ") · last inference: " +
         fmtLocal(c.last_inference_at) + " (" + fmtSecs(c.last_inference_seconds) + ")" +
         (c.grab_error ? "<br>error: " + escHtml(c.grab_error) : "") +
         "</div>";
@@ -192,14 +198,17 @@
           }).catch(function (err) { alert("Failed: " + err.message); });
       });
       controls.appendChild(pauseBtn);
+      var editBtn = document.createElement("button");
+      editBtn.textContent = "Edit";
+      editBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        // Edit opens the modal matching the camera type; Delete stays
+        // RTSP-only (the Pi camera cannot be deleted).
+        if (c.type === "rtsp") openRtspModal("edit", c);
+        else openPiModal(c);
+      });
+      controls.appendChild(editBtn);
       if (c.type === "rtsp") {
-        var editBtn = document.createElement("button");
-        editBtn.textContent = "Edit";
-        editBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          openCameraModal("edit", c);
-        });
-        controls.appendChild(editBtn);
         var delBtn = document.createElement("button");
         delBtn.textContent = "Delete";
         delBtn.className = "danger";
@@ -283,12 +292,14 @@
   }
 
   // ---- events ----
-  function eventsQuery(reset) {
+  function eventsQuery(reset, after) {
     var q = "/api/events?limit=25";
     if (state.cameraFilter) q += "&camera=" + encodeURIComponent(state.cameraFilter);
     if (state.classFilter) q += "&class=" + encodeURIComponent(state.classFilter);
     if (state.hideEmpty) q += "&hide_empty=1";
-    if (!reset && state.eventsCursor) {
+    if (after) {
+      q += "&after=" + encodeURIComponent(after);
+    } else if (!reset && state.eventsCursor) {
       q += "&before=" + encodeURIComponent(state.eventsCursor);
     }
     return q;
@@ -316,21 +327,51 @@
     }).then(function () { state.eventsLoading = false; });
   }
 
+  function loadNewEvents() {
+    if (state.eventsLoading) return Promise.resolve();
+    if (!state.events.length) return loadEvents(true);
+    state.eventsLoading = true;
+    var newest = state.events[0].event_id;
+    return api(eventsQuery(false, newest)).then(function (r) {
+      var fresh = (r.events || []).filter(function (e) {
+        return !state.events.some(function (old) {
+          return old.event_id === e.event_id;
+        });
+      });
+      var list = $("eventsList");
+      for (var k = fresh.length - 1; k >= 0; k--) {
+        state.events.unshift(fresh[k]);
+        list.insertBefore(eventRow(fresh[k]), list.firstChild);
+      }
+    }).catch(function (e) {
+      console.error("events load failed", e);
+    }).then(function () { state.eventsLoading = false; });
+  }
+
+  function eventRow(e) {
+    var li = document.createElement("li");
+    var timeHtml = "<span class=\"event-time\" title=\"" + fmtUTC(e.timestamp) +
+      "\">" + fmtLocal(e.timestamp) + "</span>";
+    li.innerHTML =
+      "<div class=\"event-info\"><b>" + escHtml(e.camera_id) + "</b> " + timeHtml +
+      "<div class=\"event-objs\">" + escHtml(countsSummary(e.counts)) + "</div>" +
+      (e.has_metadata ? "" : "<div class=\"event-objs\">no metadata</div>") +
+      "</div>" +
+      "<img src=\"" + e.image_url + "\" alt=\"Event image\" loading=\"lazy\">";
+    li.addEventListener("click", function () {
+      var idx = state.events.findIndex(function (ev) {
+        return ev.event_id === e.event_id;
+      });
+      if (idx >= 0) openModal(idx);
+    });
+    return li;
+  }
+
   function renderEvents() {
     var list = $("eventsList");
     list.innerHTML = "";
-    state.events.forEach(function (e, i) {
-      var li = document.createElement("li");
-      var timeHtml = "<span class='event-time' title='" + fmtUTC(e.timestamp) +
-        "'>" + fmtLocal(e.timestamp) + "</span>";
-      li.innerHTML =
-        "<div class='event-info'><b>" + escHtml(e.camera_id) + "</b> " + timeHtml +
-        "<div class='event-objs'>" + escHtml(countsSummary(e.counts)) + "</div>" +
-        (e.has_metadata ? "" : "<div class='event-objs'>no metadata</div>") +
-        "</div>" +
-        "<img src='" + e.image_url + "' alt='Event image' loading='lazy'>";
-      li.addEventListener("click", function () { openModal(i); });
-      list.appendChild(li);
+    state.events.forEach(function (e) {
+      list.appendChild(eventRow(e));
     });
   }
 
@@ -361,6 +402,38 @@
     });
   }
 
+  function sanitizeFilename(s) {
+    var t = String(s == null ? "" : s);
+    var bad = "<>:\"/|?*" + String.fromCharCode(92);
+    var out = "";
+    for (var i = 0; i < t.length; i++) {
+      var ch = t.charAt(i);
+      out += (bad.indexOf(ch) >= 0 || ch < " ") ? "-" : ch;
+    }
+    out = out.replace(/-+/g, "-").replace(/^[-. ]+|[-. ]+$/g, "");
+    return out || "camera";
+  }
+  function fmtFileTs(iso) {
+    var d = new Date(iso);
+    function p2(n) { n = String(n); return n.length < 2 ? "0" + n : n; }
+    return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+  }
+  function cameraName(cid) {
+    for (var i = 0; i < state.cameras.length; i++) {
+      if (state.cameras[i].camera_id === cid) return state.cameras[i].name || cid;
+    }
+    return cid;
+  }
+  function downloadModalImage() {
+    var e = state.events[state.modalIndex];
+    if (!e || !e.image_url) return;
+    var a = document.createElement("a");
+    a.href = e.image_url;
+    a.download = sanitizeFilename(cameraName(e.camera_id)) + "-" + fmtFileTs(e.timestamp) + ".jpg";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
   function openModal(i) {
     state.modalIndex = i;
     var e = state.events[i];
@@ -378,7 +451,7 @@
     state.modalIndex = -1;
     if (state.eventsStale) {
       state.eventsStale = false;
-      loadEvents(true);
+      loadNewEvents();
     }
   }
   function modalStep(d) {
@@ -389,6 +462,7 @@
   // ---- latest frame ----
   function loadLatest() {
     if (!state.selectedCamera) return Promise.resolve();
+    loadLatestDets();
     return api("/api/latest?camera=" + encodeURIComponent(state.selectedCamera))
       .then(function (r) {
         $("latestImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
@@ -396,19 +470,302 @@
           fmtLocal(r.timestamp) + " · " + countsSummary(r.counts);
       }).catch(function () { /* no frame yet */ });
   }
+  // Weak (sub-threshold) detections are a Latest Frame diagnostic only:
+  // text list, no bbox overlay. Confirmed entries render in normal text,
+  // weak entries are muted with a "(weak)" marker.
+  function loadLatestDets() {
+    if (!state.selectedCamera) return;
+    api("/api/latest_meta?camera=" + encodeURIComponent(state.selectedCamera))
+      .then(renderLatestDets)
+      .catch(function () { /* no frame yet */ });
+  }
+  function renderLatestDets(m) {
+    var el = $("latestDets");
+    var items = [];
+    Object.keys(m.detections || {}).forEach(function (cls) {
+      (m.detections[cls] || []).forEach(function (d) {
+        items.push({ label: cls + " " + d.confidence.toFixed(2), weak: false });
+      });
+    });
+    (m.weak_detections || []).forEach(function (w) {
+      items.push({ label: w.class + " " + w.confidence.toFixed(2) + " (weak)", weak: true });
+    });
+    el.innerHTML = "";
+    if (!items.length) {
+      var s = document.createElement("span");
+      s.className = "counts-empty";
+      s.textContent = "No object detections";
+      el.appendChild(s);
+      return;
+    }
+    items.forEach(function (it) {
+      var s = document.createElement("span");
+      if (it.weak) s.className = "dim";
+      s.textContent = it.label;
+      el.appendChild(s);
+      el.appendChild(document.createTextNode("  "));
+    });
+  }
 
-  // ---- camera add/edit modal ----
-  function buildIconPicker() {
-    var box = $("iconPicker");
+
+  // ---- shared Detection tab ----
+  // ONE instance, built once and moved between the camera modals
+  // (appendChild moves the node), so there is a single builder, a
+  // single collect/validate path, and no duplicate element IDs.
+  var DET_GROUPS = [
+    ["People", ["person"]],
+    ["Vehicles", ["bicycle", "car", "motorcycle", "bus", "truck", "train", "boat", "airplane"]],
+    ["Animals", ["cat", "dog", "bird", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe"]],
+    ["Street", ["traffic light", "stop sign", "fire hydrant", "parking meter", "bench"]],
+    ["Carried", ["backpack", "handbag", "suitcase", "umbrella", "tie"]],
+    ["Sports", ["sports ball", "frisbee", "kite", "skateboard", "surfboard", "skis", "snowboard", "baseball bat", "baseball glove", "tennis racket"]],
+    ["Electronics", ["cell phone", "laptop", "tv", "keyboard", "mouse", "remote"]],
+    ["Furniture", ["chair", "couch", "bed", "dining table", "toilet", "potted plant"]],
+    ["Appliances", ["refrigerator", "microwave", "oven", "toaster", "sink"]],
+    ["Kitchen", ["bottle", "cup", "wine glass", "bowl", "fork", "knife", "spoon"]],
+    ["Food", ["apple", "banana", "orange", "broccoli", "carrot", "sandwich", "hot dog", "pizza", "donut", "cake"]],
+    ["Household", ["book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]]
+  ];
+  // Mirrors the server DEFAULT_WATCHLIST (yolo_sensor.py): the Add
+  // flow starts with the service default, never an empty watchlist.
+  var DET_DEFAULT_WATCHLIST = ["person", "car", "truck", "bus",
+    "dog", "cat", "bicycle", "motorcycle"];
+  var DET_IMG_SIZES = [320, 480, 640, 960, 1280];
+  var detNode = null;
+  var detState = { sel: {}, q: "", selOnly: false, classes: [] };
+
+  // Extra state for the tabbed camera modals + Pi preview.
+  state.camModal = null; // "rtsp" | "pi" | null — which camera modal is open
+  state.camTab = "main"; // "main" | "detection" — active tab of the open modal
+  state.piExpMode = "auto"; // "auto" | "manual"
+  state.svcBufferBytes = 0;
+  state.piPreviewTs = null;
+  state.piPreviewSeq = 0;
+
+  function buildDetectionPanel() {
+    var root = document.createElement("div");
+    root.id = "detPanel";
+    root.className = "det-grid";
+    root.innerHTML =
+      '<div class="det-left">' +
+      '<section class="det-card"><h3>Detection</h3>' +
+      '<div class="det-row">' +
+      '<label class="det-field det-narrow">Sample every' +
+      '<span class="suffix-input"><input type="number" id="detSample" value="5" step="0.1" min="0.5"><span>sec</span></span></label>' +
+      '<label class="det-field det-grow">Confidence threshold' +
+      '<span class="slider-row"><input type="range" id="detConf" min="0" max="1" step="0.05" value="0.5"><span class="readout" id="detConfOut">0.50</span></span></label>' +
+      '</div>' +
+      '<div class="det-row">' +
+      '<label class="det-field det-narrow">Image size' +
+      '<select id="detImgsz"><option value="320">320</option><option value="480">480</option><option value="640">640</option><option value="960">960</option><option value="1280">1280</option></select></label>' +
+      '<label class="det-field det-narrow">Heartbeat' +
+      '<span class="suffix-input"><input type="number" id="detHeartbeat" value="600" step="1" min="30"><span>sec</span></span></label>' +
+      '</div>' +
+      '<div class="det-row">' +
+      '<label class="det-field det-narrow">Confirm absent (cycles)' +
+      '<input type="number" id="detDisappear" value="4" step="1" min="2" max="20"></label>' +
+      '</div>' +
+      '<p class="hint">Image size is the inference resolution. Larger finds smaller objects but runs slower.</p>' +
+      '<p class="hint">Confirm absent: a disappearance (count dropping to zero) is published only after this many consecutive empty cycles. Default 4.</p>' +
+      '</section>' +
+      '<section class="det-card"><h3>Publish</h3>' +
+      '<div class="det-publish">' +
+      '<label><input type="checkbox" id="detPubClassId"> classId <span class="dim">topics</span></label>' +
+      '<label><input type="checkbox" id="detPubClassName"> className <span class="dim">topics</span></label>' +
+      '<label><input type="checkbox" id="detPubEvents"> events <span class="dim">topic</span></label>' +
+      '</div></section>' +
+      '<div class="det-note">Using <b id="detModelName">yolov8n</b>. The model and image history limit apply to all cameras. Change them in <a href="#" id="detSvcLink">Service settings</a>.</div>' +
+      '</div>' +
+      '<section class="det-card det-watch">' +
+      '<div class="det-watch-head"><h3>Watchlist</h3>' +
+      '<div class="det-watch-count"><span id="detWatchCount">0 of 0 selected</span> <button type="button" id="detWatchClear">Clear</button></div></div>' +
+      '<div class="det-watch-tools"><span class="det-search"><input id="detWatchFilter" placeholder="Filter classes&hellip;"></span>' +
+      '<label><input type="checkbox" id="detWatchSelOnly">Selected only</label></div>' +
+      '<div id="detWatchGroups" class="det-watch-groups"></div>' +
+      '</section>';
+    root.querySelector("#detConf").addEventListener("input", function () {
+      root.querySelector("#detConfOut").textContent =
+        parseFloat(this.value).toFixed(2);
+    });
+    root.querySelector("#detWatchFilter").addEventListener("input", function () {
+      detState.q = this.value;
+      renderDetWatch();
+    });
+    root.querySelector("#detWatchSelOnly").addEventListener("change", function () {
+      detState.selOnly = this.checked;
+      renderDetWatch();
+    });
+    root.querySelector("#detWatchClear").addEventListener("click", function () {
+      detState.sel = {};
+      renderDetWatch();
+    });
+    root.querySelector("#detSvcLink").addEventListener("click", function (e) {
+      e.preventDefault();
+      openServiceSettings();
+    });
+    return root;
+  }
+
+  function detGroups() {
+    // Designer groups + an "Other" bucket for any live class the
+    // mapping does not cover (keeps every class reachable).
+    var groups = DET_GROUPS.map(function (g) {
+      return { name: g[0], classes: g[1].slice() };
+    });
+    var mapped = {};
+    DET_GROUPS.forEach(function (g) {
+      g[1].forEach(function (n) { mapped[n] = true; });
+    });
+    var other = detState.classes.filter(function (n) { return !mapped[n]; });
+    if (other.length) groups.push({ name: "Other", classes: other });
+    return groups;
+  }
+
+  function renderDetWatch() {
+    var box = $("detWatchGroups");
+    if (!box) return;
+    box.innerHTML = "";
+    var q = detState.q.trim().toLowerCase();
+    var total = detState.classes.length;
+    var selCount = 0;
+    detState.classes.forEach(function (n) { if (detState.sel[n]) selCount++; });
+    $("detWatchCount").textContent = selCount + " of " + total + " selected";
+    var filter = $("detWatchFilter");
+    filter.placeholder = total ? ("Filter " + total + " classes\u2026") : "Filter classes\u2026";
+    var any = false;
+    detGroups().forEach(function (g) {
+      var on = g.classes.filter(function (n) { return detState.sel[n]; }).length;
+      var items = g.classes.filter(function (n) {
+        if (q && n.indexOf(q) === -1 && g.name.toLowerCase().indexOf(q) === -1) return false;
+        if (detState.selOnly && !detState.sel[n]) return false;
+        return true;
+      });
+      if (!items.length) return;
+      any = true;
+      var row = document.createElement("div");
+      row.className = "det-group-row";
+      var head = document.createElement("div");
+      head.className = "det-group-head";
+      head.innerHTML = "<span class=\"det-group-name\">" + escHtml(g.name) +
+        "</span><span class=\"det-group-count\">" + on + " / " + g.classes.length + "</span>";
+      row.appendChild(head);
+      var chips = document.createElement("div");
+      chips.className = "det-chips";
+      items.forEach(function (n) {
+        var chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "det-chip" + (detState.sel[n] ? " selected" : "");
+        chip.setAttribute("aria-pressed", detState.sel[n] ? "true" : "false");
+        chip.textContent = (detState.sel[n] ? "\u2713 " : "") + n;
+        chip.addEventListener("click", function () {
+          if (detState.sel[n]) delete detState.sel[n]; else detState.sel[n] = true;
+          renderDetWatch();
+        });
+        chips.appendChild(chip);
+      });
+      row.appendChild(chips);
+      box.appendChild(row);
+    });
+    if (!any) {
+      var empty = document.createElement("div");
+      empty.className = "det-watch-empty";
+      empty.textContent = "No classes match.";
+      box.appendChild(empty);
+    }
+  }
+
+  // Load the live class list (any camera's list is the full model
+  // list). Falls back to an empty list; the server also serves the
+  // service-level list when no cameras exist.
+  function loadDetClasses() {
+    return api("/api/classes").then(function (r) {
+      detState.classes = (r.classes || []).slice().sort();
+      renderDetWatch();
+    }).catch(function () { /* keep previous list */ });
+  }
+
+  function updateDetModelNote() {
+    var el = $("detModelName");
+    if (el) el.textContent = (state.lastStatus && state.lastStatus.model) || "yolov8n";
+  }
+
+  function fillDetection(v) {
+    $("detSample").value = v.sample_interval != null ? v.sample_interval : 5;
+    var conf = $("detConf");
+    conf.value = v.confidence_threshold != null ? v.confidence_threshold : 0.5;
+    $("detConfOut").textContent = parseFloat(conf.value).toFixed(2);
+    var sel = $("detImgsz");
+    // Drop a previous stored-value passthrough, then re-add it if
+    // the stored imgsz is still off-list (never silently change it).
+    Array.prototype.slice.call(sel.querySelectorAll("option.det-extra")).forEach(function (o) {
+      sel.removeChild(o);
+    });
+    var iv = parseInt(v.imgsz != null ? v.imgsz : 640, 10);
+    if (DET_IMG_SIZES.indexOf(iv) === -1) {
+      var o = document.createElement("option");
+      o.value = String(iv);
+      o.textContent = String(iv) + " (current)";
+      o.className = "det-extra";
+      sel.appendChild(o);
+    }
+    sel.value = String(iv);
+    $("detHeartbeat").value = v.heartbeat_interval != null ? v.heartbeat_interval : 600;
+    $("detDisappear").value = v.disappear_confirm_cycles != null ? v.disappear_confirm_cycles : 4;
+    var pub = v.publish || {};
+    $("detPubClassId").checked = pub.classId !== false;
+    $("detPubClassName").checked = pub.className !== false;
+    $("detPubEvents").checked = pub.events !== false;
+    detState.sel = {};
+    (v.watchlist || []).forEach(function (n) { detState.sel[n] = true; });
+    detState.q = "";
+    detState.selOnly = false;
+    $("detWatchFilter").value = "";
+    $("detWatchSelOnly").checked = false;
+    renderDetWatch();
+  }
+
+  function collectDetection() {
+    var watch = [];
+    detState.classes.forEach(function (n) {
+      if (detState.sel[n]) watch.push(n);
+    });
+    return {
+      sample_interval: parseFloat($("detSample").value),
+      confidence_threshold: parseFloat($("detConf").value),
+      imgsz: parseInt($("detImgsz").value, 10),
+      heartbeat_interval: parseInt($("detHeartbeat").value, 10),
+      disappear_confirm_cycles: parseInt($("detDisappear").value, 10),
+      publish: {
+        classId: $("detPubClassId").checked,
+        className: $("detPubClassName").checked,
+        events: $("detPubEvents").checked,
+      },
+      watchlist: watch,
+    };
+  }
+
+  function validateDetection() {
+    var errs = [];
+    var d = collectDetection();
+    if (!(d.sample_interval >= 0.5)) errs.push({ field: "sample_interval", message: "Sample every must be at least 0.5 sec." });
+    if (!(d.confidence_threshold >= 0 && d.confidence_threshold <= 1)) errs.push({ field: "confidence_threshold", message: "Confidence threshold must be 0\u20131." });
+    if (!(d.imgsz > 0)) errs.push({ field: "imgsz", message: "Image size must be a positive number." });
+    if (!(d.heartbeat_interval >= 30)) errs.push({ field: "heartbeat_interval", message: "Heartbeat must be at least 30 sec." });
+    if (!Number.isInteger(d.disappear_confirm_cycles) || d.disappear_confirm_cycles < 2 || d.disappear_confirm_cycles > 20) errs.push({ field: "disappear_confirm_cycles", message: "Confirm absent must be 2-20 cycles." });
+    return errs;
+  }
+
+  // ---- icon picker (one builder, parameterized by container) ----
+  function buildIconPicker(box, selected) {
     box.innerHTML = "";
     Object.keys(ICONS).forEach(function (key) {
       var btn = document.createElement("button");
       btn.type = "button";
       btn.dataset.icon = key;
       btn.title = ICON_LABELS[key] || key;
-      btn.innerHTML = iconSVG(key) +
-        "<span class='icon-label'>" + escHtml(ICON_LABELS[key] || key) + "</span>";
-      if (key === state.cameraIcon) btn.classList.add("selected");
+      btn.setAttribute("aria-label", ICON_LABELS[key] || key);
+      btn.innerHTML = iconSVG(key); // icon-only button; name stays in the title tooltip
+      if (key === selected) btn.classList.add("selected");
       btn.addEventListener("click", function () {
         state.cameraIcon = key;
         box.querySelectorAll("button").forEach(function (b) {
@@ -419,40 +776,163 @@
     });
   }
 
-  function cameraFormValues() {
-    var form = $("cameraForm");
+  // ---- camera modal tabs + error dots ----
+  function camTabEls(which) {
+    var p = which === "rtsp" ? "rtsp" : "pi";
     return {
-      name: form.name.value,
-      icon: state.cameraIcon,
-      scheme: form.scheme.value,
-      host: form.host.value,
-      port: parseInt(form.port.value, 10),
-      path: form.path.value,
-      stream: form.stream.value,
-      transport: form.transport.value,
-      connection_mode: form.connection_mode.value,
-      timeout_s: parseInt(form.timeout_s.value, 10),
-      credentials_on: form.credentials_on.checked,
-      username: form.username.value,
-      password: form.password.value,
-      tls_allow_self_signed: form.tls_allow_self_signed.checked,
-      sample_interval: parseFloat(form.sample_interval.value),
-      snapshot_url: form.snapshot_url.value,
-      rotate: parseInt(form.rotate.value, 10),
-      start_paused: form.start_paused.checked,
+      mainTab: $(p + (which === "rtsp" ? "TabConn" : "TabCam")),
+      detTab: $(p + "TabDet"),
+      mainPanel: $(p + "MainPanel"),
+      detPanel: $(p + "DetPanel"),
     };
   }
 
-  function openCameraModal(mode, cam) {
-    var form = $("cameraForm");
-    state.editingCameraId = mode === "edit" && cam ? cam.camera_id : null;
+  function switchCamTab(which, tab) {
+    state.camTab = tab;
+    var els = camTabEls(which);
+    els.mainTab.classList.toggle("active", tab === "main");
+    els.detTab.classList.toggle("active", tab === "detection");
+    els.mainTab.setAttribute("aria-selected", tab === "main" ? "true" : "false");
+    els.detTab.setAttribute("aria-selected", tab === "detection" ? "true" : "false");
+    els.mainPanel.classList.toggle("hidden", tab !== "main");
+    els.detPanel.classList.toggle("hidden", tab !== "detection");
+  }
+
+  function setTabDots(which, badTabs) {
+    var els = camTabEls(which);
+    els.mainTab.querySelector(".tab-dot").classList.toggle("hidden", badTabs.indexOf("main") === -1);
+    els.detTab.querySelector(".tab-dot").classList.toggle("hidden", badTabs.indexOf("detection") === -1);
+  }
+
+  function clearTabDots(which) { setTabDots(which, []); }
+
+  // Dots clear as errors are fixed (revalidate on input/change, but
+  // never newly show a dot outside of Save).
+  function refreshTabDots() {
+    if (!state.camModal || !detNode) return;
+    var which = state.camModal;
+    var mainErrs = which === "rtsp" ? validateRtspMain() : validatePiMain();
+    var detErrs = validateDetection();
+    var els = camTabEls(which);
+    if (!mainErrs.length) els.mainTab.querySelector(".tab-dot").classList.add("hidden");
+    if (!detErrs.length) els.detTab.querySelector(".tab-dot").classList.add("hidden");
+  }
+
+  function mountDetection(intoPanel) {
+    if (!detNode) detNode = buildDetectionPanel();
+    intoPanel.appendChild(detNode); // appendChild moves the single node
+  }
+
+  // Percent-encode like Python urllib.parse.quote(safe=""): everything
+  // except letters, digits, and _.-~ gets percent-encoded.
+  function quoteStrict(s) {
+    return encodeURIComponent(s).replace(/[!'()*]/g, function (c) {
+      return "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0");
+    });
+  }
+
+  // Mirror the server build_rtsp_url() for DISPLAY ONLY, with the
+  // password always masked as literal bullets. NEVER put the real
+  // password in the DOM: a non-blank password field shows bullets;
+  // on edit, a blank password means the stored password (bullets);
+  // on add, a blank password means the server sends an empty one.
+  function buildResolvedUrl(v, isEdit) {
+    var path = v.path || "/";
+    if (path.indexOf("{stream}") !== -1) path = path.replace("{stream}", v.stream);
+    if (path.charAt(0) !== "/") path = "/" + path;
+    var auth = "";
+    if (v.credentials_on && v.username) {
+      var pw = v.password ? "\u2022\u2022\u2022" : (isEdit ? "\u2022\u2022\u2022" : "");
+      auth = quoteStrict(v.username) + ":" + pw + "@";
+    }
+    return v.scheme + "://" + auth + v.host + ":" + v.port + path;
+  }
+
+  function updateResolvedUrl() {
+    var el = $("resolvedUrl");
+    if (!el) return;
+    el.textContent = buildResolvedUrl(collectRtspConn(), !!state.editingCameraId);
+  }
+
+  function updateCameraFormToggles() {
+    var form = $("rtspForm");
+    var creds = form.credentials_on.checked;
+    form.username.disabled = !creds;
+    form.password.disabled = !creds;
+    $("rtspSelfSignedRow").classList.toggle("hidden", form.scheme.value !== "rtsps");
+    updateResolvedUrl();
+  }
+
+  // ---- RTSP camera modal ----
+  function collectRtspConn() {
+    var form = $("rtspForm");
+    return {
+      scheme: form.scheme.value, host: form.host.value,
+      port: parseInt(form.port.value, 10), path: form.path.value,
+      stream: form.stream.value, transport: form.transport.value,
+      connection_mode: form.connection_mode.value,
+      timeout_s: parseInt(form.timeout_s.value, 10),
+      credentials_on: form.credentials_on.checked,
+      username: form.username.value, password: form.password.value,
+      tls_allow_self_signed: form.tls_allow_self_signed.checked,
+    };
+  }
+
+  function collectRtsp() {
+    var form = $("rtspForm");
+    var det = collectDetection();
+    var body = collectRtspConn();
+    body.name = form.name.value;
+    body.icon = state.cameraIcon;
+    body.snapshot_url = form.snapshot_url.value;
+    body.rotate = parseInt(form.rotate.value, 10);
+    body.start_paused = form.start_paused.checked;
+    body.sample_interval = det.sample_interval;
+    body.confidence_threshold = det.confidence_threshold;
+    body.imgsz = det.imgsz;
+    body.heartbeat_interval = det.heartbeat_interval;
+    body.disappear_confirm_cycles = det.disappear_confirm_cycles;
+    body.publish = det.publish;
+    body.watchlist = det.watchlist;
+    return body;
+  }
+
+  function validateRtspMain() {
+    var form = $("rtspForm");
+    var errs = [];
+    if (!form.name.value.trim()) errs.push({ field: "name", message: "Name is required." });
+    if (!form.host.value.trim()) errs.push({ field: "host", message: "Host / IP is required." });
+    var port = parseInt(form.port.value, 10);
+    if (!(port >= 1 && port <= 65535)) errs.push({ field: "port", message: "Port must be 1\u201365535." });
+    var to = parseInt(form.timeout_s.value, 10);
+    if (!(to >= 1 && to <= 120)) errs.push({ field: "timeout_s", message: "Timeout must be 1\u2013120 sec." });
+    var snap = form.snapshot_url.value.trim();
+    if (snap && snap.indexOf("http://") !== 0 && snap.indexOf("https://") !== 0) errs.push({ field: "snapshot_url", message: "Snapshot URL must start with http:// or https://." });
+    return errs;
+  }
+
+  function closeRtspModal() {
+    $("rtspCameraModal").classList.add("hidden");
+    state.camModal = null;
+    state.editingCameraId = null;
+  }
+
+  function openRtspModal(mode, cam) {
+    state.camModal = "rtsp";
+    state.editingCameraId = (mode === "edit" && cam) ? cam.camera_id : null;
     state.cameraIcon = (mode === "edit" && cam && cam.icon) ? cam.icon : "camera";
-    buildIconPicker();
-    $("cameraTestResult").classList.add("hidden");
-    $("cameraError").textContent = "";
+    buildIconPicker($("rtspIconPicker"), state.cameraIcon);
+    $("rtspTestResult").classList.add("hidden");
+    $("rtspError").textContent = "";
+    clearTabDots("rtsp");
+    // Mount FIRST: fillDetection/updateDetModelNote/loadDetClasses below
+    // all touch the shared Detection node (built here on first open).
+    mountDetection($("rtspDetPanel"));
+    var form = $("rtspForm");
     if (mode === "edit" && cam) {
-      $("cameraModalTitle").textContent = "Edit camera — " + cam.name;
-      $("cameraSaveBtn").textContent = "Save";
+      $("rtspEyebrow").textContent = "EDIT CAMERA";
+      $("rtspTitle").textContent = cam.name;
+      $("rtspSaveBtn").textContent = "Save";
       form.name.value = cam.name || "";
       var rtsp = cam.rtsp || {};
       form.scheme.value = rtsp.scheme || "rtsp";
@@ -465,187 +945,379 @@
       form.timeout_s.value = rtsp.timeout_s != null ? rtsp.timeout_s : 10;
       form.credentials_on.checked = !!(rtsp.username || rtsp.has_password);
       form.username.value = rtsp.username || "";
-      form.password.value = ""; // never prefilled; blank keeps stored
+      form.password.value = ""; // blank keeps the stored password
+      form.password.placeholder = "\u2022\u2022\u2022\u2022\u2022\u2022 (unchanged)";
       form.tls_allow_self_signed.checked = !!rtsp.tls_allow_self_signed;
-      form.sample_interval.value = cam.sample_interval != null ? cam.sample_interval : 5;
       form.snapshot_url.value = rtsp.snapshot_url || "";
       form.rotate.value = cam.rotate != null ? cam.rotate : 0;
       form.start_paused.checked = !!cam.paused;
+      fillDetection({
+        sample_interval: cam.sample_interval,
+        confidence_threshold: cam.confidence_threshold,
+        imgsz: cam.imgsz,
+        heartbeat_interval: cam.heartbeat_interval,
+        publish: cam.publish,
+        watchlist: cam.watchlist,
+      });
     } else {
-      $("cameraModalTitle").textContent = "Add camera";
-      $("cameraSaveBtn").textContent = "Add";
+      $("rtspEyebrow").textContent = "ADD CAMERA";
+      $("rtspTitle").textContent = "Add camera";
+      $("rtspSaveBtn").textContent = "Add";
       form.reset();
       form.port.value = 554;
       form.timeout_s.value = 10;
-      form.sample_interval.value = 5;
       form.rotate.value = 0;
+      form.password.placeholder = "";
+      fillDetection({
+        sample_interval: 5, confidence_threshold: 0.5, imgsz: 640,
+        heartbeat_interval: 600,
+        publish: { classId: true, className: true, events: true },
+        watchlist: DET_DEFAULT_WATCHLIST,
+      });
     }
     updateCameraFormToggles();
-    $("cameraModal").classList.remove("hidden");
+    updateDetModelNote();
+    loadDetClasses();
+    switchCamTab("rtsp", "main");
+    $("rtspCameraModal").classList.remove("hidden");
   }
 
-  function updateCameraFormToggles() {
-    var form = $("cameraForm");
-    var creds = form.credentials_on.checked;
-    form.username.disabled = !creds;
-    form.password.disabled = !creds;
-    $("selfSignedRow").classList.toggle("hidden", form.scheme.value !== "rtsps");
+  function testRtspConnection() {
+    var result = $("rtspTestResult");
+    result.classList.remove("hidden");
+    $("rtspTestMeta").textContent = "Testing…";
+    api("/api/cameras/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectRtsp()),
+    }).then(function (r) {
+      if (r.jpeg_base64) $("rtspTestThumb").src = "data:image/jpeg;base64," + r.jpeg_base64;
+      $("rtspTestMeta").textContent = "OK — " + (r.resolution ? r.resolution.join("x") : "") +
+        " · " + (r.grab_seconds != null ? r.grab_seconds.toFixed(2) + "s" : "") +
+        (r.camera ? " · " + r.camera : "");
+    }).catch(function (e) {
+      $("rtspTestMeta").textContent = "Connection failed: " + e.message;
+    });
   }
 
-  function closeCameraModal() {
-    $("cameraModal").classList.add("hidden");
+  function submitRtspForm(ev) {
+    ev.preventDefault();
+    var mainErrs = validateRtspMain();
+    var detErrs = validateDetection();
+    var bad = [];
+    if (mainErrs.length) bad.push("main");
+    if (detErrs.length) bad.push("detection");
+    setTabDots("rtsp", bad);
+    if (bad.length) {
+      switchCamTab("rtsp", bad[0]);
+      $("rtspError").textContent = (bad[0] === "main" ? mainErrs[0] : detErrs[0]).message;
+      return;
+    }
+    $("rtspError").textContent = "";
+    $("rtspSaveBtn").disabled = true;
+    var url = state.editingCameraId
+      ? "/api/cameras/" + encodeURIComponent(state.editingCameraId)
+      : "/api/cameras";
+    var method = state.editingCameraId ? "PATCH" : "POST";
+    api(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(collectRtsp()) })
+      .then(function () {
+        closeRtspModal();
+        loadCameras();
+        loadStatus();
+      })
+      .catch(function (e) {
+        $("rtspError").textContent = "Save failed: " + e.message;
+        var tab = mapServerErrorToTab(e.message);
+        setTabDots("rtsp", [tab]);
+        switchCamTab("rtsp", tab);
+      })
+      .then(function () { $("rtspSaveBtn").disabled = false; });
+  }
+
+  // ---- Pi camera modal ----
+  function fmtEv(v) {
+    return (v > 0 ? "+" : "") + v.toFixed(1);
+  }
+
+  function snap05(v) {
+    return Math.round(v / 0.5) * 0.5;
+  }
+
+  function updatePiExpFields() {
+    var auto = state.piExpMode === "auto";
+    $("piExpAutoBtn").classList.toggle("active", auto);
+    $("piExpManualBtn").classList.toggle("active", !auto);
+    $("piExpAutoBtn").setAttribute("aria-pressed", auto ? "true" : "false");
+    $("piExpManualBtn").setAttribute("aria-pressed", !auto ? "true" : "false");
+    $("piExpAutoFields").classList.toggle("hidden", !auto);
+    $("piExpManualFields").classList.toggle("hidden", auto);
+  }
+
+  function setPiExpMode(mode) {
+    state.piExpMode = mode;
+    updatePiExpFields();
+  }
+
+  function validatePiMain() {
+    var form = $("piForm");
+    var errs = [];
+    if (!form.name.value.trim()) errs.push({ field: "name", message: "Name is required." });
+    if (state.piExpMode === "manual") {
+      var sh = parseInt($("piShutter").value, 10);
+      if (!(sh >= 1 && sh <= 10000000)) errs.push({ field: "exposure_time", message: "Shutter must be 1\u201310,000,000 \u00b5s." });
+      var g = parseFloat($("piGain").value);
+      if (!(g >= 1.0 && g <= 16.0)) errs.push({ field: "analogue_gain", message: "Analogue gain must be 1.0\u201316.0." });
+    }
+    return errs;
+  }
+
+  function collectPi() {
+    var form = $("piForm");
+    var det = collectDetection();
+    var cc = {};
+    cc.awb_enable = form.awb_enable.checked;
+    if (state.piExpMode === "auto") {
+      cc.ae_enable = true;
+      cc.exposure_value = parseFloat($("piEvSlider").value);
+      var m = $("piAeMode").value;
+      cc.ae_exposure_mode = m ? m : null;
+      // Explicit nulls CLEAR the stored manual values server-side
+      // (the merge deletes null keys); without them the old merged
+      // dict would keep exposure_time/analogue_gain forever.
+      cc.exposure_time = null;
+      cc.analogue_gain = null;
+    } else {
+      cc.ae_enable = false;
+      cc.exposure_time = parseInt($("piShutter").value, 10);
+      cc.analogue_gain = parseFloat($("piGain").value);
+    }
+    return {
+      name: form.name.value, icon: state.cameraIcon,
+      rotate: parseInt(form.rotate.value, 10),
+      start_paused: form.start_paused.checked,
+      sample_interval: det.sample_interval,
+      confidence_threshold: det.confidence_threshold,
+      imgsz: det.imgsz, heartbeat_interval: det.heartbeat_interval,
+      disappear_confirm_cycles: det.disappear_confirm_cycles,
+      publish: det.publish, watchlist: det.watchlist,
+      camera_controls: cc,
+    };
+  }
+
+  function closePiModal() {
+    state.piPreviewSeq++; // invalidate any in-flight preview poll
+    $("piCameraModal").classList.add("hidden");
+    state.camModal = null;
     state.editingCameraId = null;
   }
 
-  function testCameraConnection() {
-    var body = cameraFormValues();
-    if (state.editingCameraId) body.camera_id = state.editingCameraId;
-    $("cameraError").textContent = "";
-    $("cameraTestBtn").disabled = true;
-    return api("/api/cameras/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(function (r) {
-      $("cameraTestThumb").src = "data:image/jpeg;base64," + r.thumbnail_base64;
-      $("cameraTestMeta").textContent =
-        r.width + "x" + r.height + " · " + r.codec + " · " + r.source +
-        " · grab " + r.grab_seconds + "s";
-      $("cameraTestResult").classList.remove("hidden");
-    }).catch(function (e) {
-      $("cameraError").textContent = "Test failed: " + e.message;
-      $("cameraTestResult").classList.add("hidden");
-    }).then(function () { $("cameraTestBtn").disabled = false; });
+  function openPiModal(cam) {
+    state.camModal = "pi";
+    state.editingCameraId = cam.camera_id;
+    state.cameraIcon = cam.icon || "board";
+    buildIconPicker($("piIconPicker"), state.cameraIcon);
+    $("piTestResult").classList.add("hidden");
+    $("piError").textContent = "";
+    clearTabDots("pi");
+    // Mount FIRST: fillDetection/updateDetModelNote/loadDetClasses below
+    // all touch the shared Detection node (built here on first open).
+    mountDetection($("piDetPanel"));
+    var form = $("piForm");
+    $("piEyebrow").textContent = "EDIT PI CAMERA";
+    $("piTitle").textContent = cam.name;
+    form.name.value = cam.name || "";
+    form.rotate.value = cam.rotate != null ? cam.rotate : 0;
+    form.start_paused.checked = !!cam.paused;
+    var statusTxt = cam.status === "online" ? "Detected" : (cam.status || "Unknown");
+    $("piSensorStatus").textContent = statusTxt;
+    $("piSensorDot").className = "dot " + (cam.status || "offline");
+    $("piSensorModel").textContent = cam.sensor_model || "Unknown";
+    $("piSensorPort").textContent = cam.camera_port || "\u2014";
+    $("piSensorRes").textContent = cam.resolution ? cam.resolution.join("x") : "\u2014";
+    var cc = cam.camera_controls || {};
+    form.awb_enable.checked = cc.awb_enable !== false;
+    // Manual iff a stored manual value exists (Auto always nulls them).
+    state.piExpMode = (cc.exposure_time != null || cc.analogue_gain != null) ? "manual" : "auto";
+    $("piEvSlider").value = cc.exposure_value != null ? snap05(cc.exposure_value) : 0;
+    $("piEvOut").textContent = fmtEv(parseFloat($("piEvSlider").value));
+    $("piAeMode").value = cc.ae_exposure_mode || "";
+    $("piShutter").value = cc.exposure_time != null ? cc.exposure_time : 20000;
+    $("piGain").value = cc.analogue_gain != null ? cc.analogue_gain : 1.0;
+    updatePiExpFields();
+    fillDetection({
+      sample_interval: cam.sample_interval,
+      confidence_threshold: cam.confidence_threshold,
+      imgsz: cam.imgsz,
+      heartbeat_interval: cam.heartbeat_interval,
+      publish: cam.publish,
+      watchlist: cam.watchlist,
+    });
+    updateDetModelNote();
+    loadDetClasses();
+    switchCamTab("pi", "main");
+    $("piCameraModal").classList.remove("hidden");
+    loadPiPreview(cam.camera_id, false);
   }
 
-  function submitCameraForm(ev) {
-    ev.preventDefault();
-    var body = cameraFormValues();
-    $("cameraError").textContent = "";
-    $("cameraSaveBtn").disabled = true;
-    var req;
-    if (state.editingCameraId) {
-      req = api("/api/cameras/" + encodeURIComponent(state.editingCameraId), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    } else {
-      req = api("/api/cameras", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+  function loadPiPreview(camId, showResult) {
+    return api("/api/latest?camera=" + encodeURIComponent(camId)).then(function (r) {
+      $("piPreviewImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
+      state.piPreviewTs = r.timestamp;
+      $("piPreviewMeta").textContent = r.timestamp ? fmtLocal(r.timestamp) : "";
+      return r;
+    }).catch(function () { /* no frame yet */ });
+  }
+
+  function refreshPiPreview(showResult) {
+    var camId = state.editingCameraId;
+    if (!camId) return;
+    var seq = ++state.piPreviewSeq;
+    var btn = $("piPreviewRefresh");
+    var testBtn = $("piTestBtn");
+    btn.disabled = true;
+    testBtn.disabled = true;
+    var before = state.piPreviewTs;
+    if (showResult) {
+      $("piTestResult").classList.remove("hidden");
+      $("piTestMeta").textContent = "Capturing\u2026";
     }
-    req.then(function () {
-      closeCameraModal();
+    api("/api/capture_now", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ camera_id: camId }),
+    }).then(function () {
+      var tries = 0;
+      (function poll() {
+        if (seq !== state.piPreviewSeq) return; // modal closed / superseded
+        if (tries++ >= 10) {
+          btn.disabled = false;
+          testBtn.disabled = false;
+          if (showResult) $("piTestMeta").textContent = "Timed out — the camera may be paused.";
+          return;
+        }
+        loadPiPreview(camId, false).then(function (r) {
+          if (seq !== state.piPreviewSeq) return;
+          if (r && r.timestamp && r.timestamp !== before) {
+            btn.disabled = false;
+            testBtn.disabled = false;
+            if (showResult) {
+              api("/api/cameras").then(function (list) {
+                var c = list.filter(function (x) { return x.camera_id === camId; })[0];
+                $("piTestMeta").textContent = "Capture OK — " +
+                  (c && c.resolution ? c.resolution.join("x") : "") +
+                  (c && c.last_grab_seconds != null ? " · grab " + c.last_grab_seconds.toFixed(2) + "s" : "");
+              });
+            }
+            return;
+          }
+          setTimeout(poll, 1000);
+        });
+      })();
+    }).catch(function (e) {
+      btn.disabled = false;
+      testBtn.disabled = false;
+      if (showResult) $("piTestMeta").textContent = "Capture failed: " + e.message;
+    });
+  }
+
+  function submitPiForm(ev) {
+    ev.preventDefault();
+    var mainErrs = validatePiMain();
+    var detErrs = validateDetection();
+    var bad = [];
+    if (mainErrs.length) bad.push("main");
+    if (detErrs.length) bad.push("detection");
+    setTabDots("pi", bad);
+    if (bad.length) {
+      switchCamTab("pi", bad[0]);
+      $("piError").textContent = (bad[0] === "main" ? mainErrs[0] : detErrs[0]).message;
+      return;
+    }
+    $("piError").textContent = "";
+    $("piSaveBtn").disabled = true;
+    api("/api/cameras/" + encodeURIComponent(state.editingCameraId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectPi()),
+    }).then(function () {
+      closePiModal();
       loadCameras();
       loadStatus();
     }).catch(function (e) {
-      $("cameraError").textContent = "Save failed: " + e.message;
-    }).then(function () { $("cameraSaveBtn").disabled = false; });
+      $("piError").textContent = "Save failed: " + e.message;
+      var tab = mapServerErrorToTab(e.message);
+      setTabDots("pi", [tab]);
+      switchCamTab("pi", tab);
+    }).then(function () { $("piSaveBtn").disabled = false; });
   }
 
-  // ---- menu / settings / about ----
-  function openSettings() {
-    if (!state.selectedCamera) return;
-    var camId = state.selectedCamera;
-    $("settingsCamera").textContent = camId;
-    $("settingsError").textContent = "";
-    Promise.all([
-      api("/api/classes?camera=" + encodeURIComponent(camId)),
-      api("/api/config?camera=" + encodeURIComponent(camId)),
-      api("/api/status"),
-    ]).then(function (res) {
-      var classes = res[0], cfg = res[1], status = res[2];
-      var form = $("settingsForm");
-      form.sample_interval.value = cfg.sample_interval;
-      form.confidence_threshold.value = cfg.confidence_threshold;
-      form.model.value = status.model || "yolov8n";
-      form.imgsz.value = cfg.imgsz || 640;
-      form.buffer_cap_mb.value = Math.round(
-        (cfg.buffer.cap_bytes || 1073741824) / 1048576);
-      form.heartbeat_interval.value = cfg.heartbeat_interval;
-      form.publish_classId.checked = cfg.publish.classId !== false;
-      form.publish_className.checked = cfg.publish.className !== false;
-      form.publish_events.checked = cfg.publish.events !== false;
-      var box = $("watchlistBox");
-      box.innerHTML = "";
-      classes.classes.forEach(function (name) {
-        var label = document.createElement("label");
-        var cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.name = "watchlist";
-        cb.value = name;
-        cb.checked = (cfg.watchlist || []).indexOf(name) !== -1;
-        label.appendChild(cb);
-        label.appendChild(document.createTextNode(" " + name));
-        box.appendChild(label);
-      });
-      var cc = cfg.camera_controls || {};
-      form.cc_exposure_value.value = cc.exposure_value != null ? cc.exposure_value : "";
-      form.cc_ae_exposure_mode.value = cc.ae_exposure_mode || "";
-      form.cc_exposure_time.value = cc.exposure_time != null ? cc.exposure_time : "";
-      form.cc_analogue_gain.value = cc.analogue_gain != null ? cc.analogue_gain : "";
-      form.cc_ae_enable.checked = cc.ae_enable !== false;
-      form.cc_awb_enable.checked = cc.awb_enable !== false;
+  // Server errors map to a tab: detection keywords -> Detection,
+  // everything else (name, connection, access, camera controls) ->
+  // the first tab.
+  function mapServerErrorToTab(msg) {
+    var m = (msg || "").toLowerCase();
+    var detKeys = ["sample", "confidence", "imgsz", "image size", "heartbeat", "disappear", "absent", "publish", "watchlist"];
+    for (var i = 0; i < detKeys.length; i++) {
+      if (m.indexOf(detKeys[i]) !== -1) return "detection";
+    }
+    return "main";
+  }
+
+  // ---- Service settings (system-wide only) ----
+  function openServiceSettings() {
+    $("svcError").textContent = "";
+    api("/api/status").then(function (s) {
+      $("svcModel").value = s.model || "yolov8n";
+      var capMb = Math.round((s.buffer.cap_bytes || 1073741824) / 1048576);
+      $("svcBufferCap").value = capMb;
+      state.svcBufferBytes = s.buffer.bytes || 0;
+      updateSvcInUse();
       $("settingsModal").classList.remove("hidden");
     }).catch(function (e) {
-      $("settingsError").textContent = "Failed to load settings: " + e.message;
+      $("svcError").textContent = "Could not load service status: " + e.message;
       $("settingsModal").classList.remove("hidden");
     });
   }
 
-  function submitSettings(ev) {
+  function updateSvcInUse() {
+    var usedMb = Math.round((state.svcBufferBytes || 0) / 1048576);
+    var cap = parseInt($("svcBufferCap").value, 10);
+    if (!(cap > 0)) {
+      $("svcInUseLabel").textContent = usedMb + " MB / \u2014";
+      $("svcInUseFill").style.width = "0%";
+      return;
+    }
+    $("svcInUseLabel").textContent = usedMb + " MB / " + cap + " MB";
+    $("svcInUseFill").style.width = Math.min(100, (usedMb / cap) * 100) + "%";
+  }
+
+  function submitServiceSettings(ev) {
     ev.preventDefault();
-    var form = $("settingsForm");
-    var watchlist = [];
-    form.querySelectorAll("input[name='watchlist']:checked").forEach(
-      function (cb) { watchlist.push(cb.value); });
-    var cc = {};
-    if (form.cc_exposure_value.value !== "") {
-      cc.exposure_value = parseFloat(form.cc_exposure_value.value);
+    var model = $("svcModel").value;
+    var cap = parseInt($("svcBufferCap").value, 10);
+    if (model !== "yolov8n" && model !== "yolov8s") {
+      $("svcError").textContent = "Model must be yolov8n or yolov8s.";
+      return;
     }
-    if (form.cc_ae_exposure_mode.value !== "") {
-      cc.ae_exposure_mode = form.cc_ae_exposure_mode.value;
+    if (!(cap >= 1)) {
+      $("svcError").textContent = "Image history limit must be at least 1 MB.";
+      return;
     }
-    if (form.cc_exposure_time.value !== "") {
-      cc.exposure_time = parseInt(form.cc_exposure_time.value, 10);
-    }
-    if (form.cc_analogue_gain.value !== "") {
-      cc.analogue_gain = parseFloat(form.cc_analogue_gain.value);
-    }
-    cc.ae_enable = form.cc_ae_enable.checked;
-    cc.awb_enable = form.cc_awb_enable.checked;
-    var cmd = {
-      camera_id: state.selectedCamera,
-      sample_interval: parseFloat(form.sample_interval.value),
-      confidence_threshold: parseFloat(form.confidence_threshold.value),
-      model: form.model.value,
-      imgsz: parseInt(form.imgsz.value, 10),
-      buffer_cap_mb: parseInt(form.buffer_cap_mb.value, 10),
-      heartbeat_interval: parseInt(form.heartbeat_interval.value, 10),
-      publish: {
-        classId: form.publish_classId.checked,
-        className: form.publish_className.checked,
-        events: form.publish_events.checked,
-      },
-      watchlist: watchlist,
-      camera_controls: cc,
-    };
-    $("settingsError").textContent = "";
+    $("svcSaveBtn").disabled = true;
+    // Service-level path: the sentinel camera_id "service" routes to
+    // apply_service_config. Only model + buffer cap are sent — no
+    // per-camera keys, no per-camera id.
     api("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cmd),
+      body: JSON.stringify({ camera_id: "service", model: model, buffer_cap_mb: cap }),
     }).then(function () {
       $("settingsModal").classList.add("hidden");
+      loadStatus().then(updateDetModelNote);
       loadCameras();
-      loadCounts();
-      loadStatus();
     }).catch(function (e) {
-      $("settingsError").textContent = "Save failed: " + e.message;
-    });
+      $("svcError").textContent = "Save failed: " + e.message;
+    }).then(function () { $("svcSaveBtn").disabled = false; });
   }
 
   function init() {
@@ -661,7 +1333,8 @@
     });
     $("menuSettings").addEventListener("click", function () {
       $("menu").classList.add("hidden");
-      openSettings();
+      // Service settings is system-wide only: no camera required.
+      openServiceSettings();
     });
     $("menuAbout").addEventListener("click", function () {
       $("menu").classList.add("hidden");
@@ -670,10 +1343,15 @@
     $("aboutClose").addEventListener("click", function () {
       $("aboutModal").classList.add("hidden");
     });
+    // Service settings modal (system-wide only).
     $("settingsClose").addEventListener("click", function () {
       $("settingsModal").classList.add("hidden");
     });
-    $("settingsForm").addEventListener("submit", submitSettings);
+    $("svcCancelBtn").addEventListener("click", function () {
+      $("settingsModal").classList.add("hidden");
+    });
+    $("svcForm").addEventListener("submit", submitServiceSettings);
+    $("svcBufferCap").addEventListener("input", updateSvcInUse);
     $("zeroToggle").addEventListener("change", loadCounts);
     $("hideEmptyToggle").addEventListener("change", function () {
       state.hideEmpty = $("hideEmptyToggle").checked;
@@ -701,16 +1379,41 @@
     $("bboxToggle").addEventListener("change", function () {
       $("modalSvg").style.display = $("bboxToggle").checked ? "" : "none";
     });
-    // Camera add/edit modal
+    $("modalDownload").addEventListener("click", downloadModalImage);
+    // Camera modals: RTSP (Connection | Detection) and Pi (Camera | Detection).
     $("addCameraBtn").addEventListener("click", function () {
-      openCameraModal("add", null);
+      openRtspModal("add", null);
     });
-    $("cameraClose").addEventListener("click", closeCameraModal);
-    $("cameraCancelBtn").addEventListener("click", closeCameraModal);
-    $("cameraForm").addEventListener("submit", submitCameraForm);
-    $("cameraTestBtn").addEventListener("click", testCameraConnection);
-    $("cameraForm").credentials_on.addEventListener("change", updateCameraFormToggles);
-    $("cameraForm").scheme.addEventListener("change", updateCameraFormToggles);
+    $("rtspClose").addEventListener("click", closeRtspModal);
+    $("rtspCancelBtn").addEventListener("click", closeRtspModal);
+    $("rtspForm").addEventListener("submit", submitRtspForm);
+    $("rtspTestBtn").addEventListener("click", testRtspConnection);
+    $("rtspForm").credentials_on.addEventListener("change", updateCameraFormToggles);
+    $("rtspForm").addEventListener("input", function () {
+      updateResolvedUrl();
+      refreshTabDots();
+    });
+    $("rtspForm").addEventListener("change", function () {
+      updateCameraFormToggles();
+      refreshTabDots();
+    });
+    $("rtspForm").scheme.addEventListener("change", updateCameraFormToggles);
+    $("rtspTabConn").addEventListener("click", function () { switchCamTab("rtsp", "main"); });
+    $("rtspTabDet").addEventListener("click", function () { switchCamTab("rtsp", "detection"); });
+    $("piClose").addEventListener("click", closePiModal);
+    $("piCancelBtn").addEventListener("click", closePiModal);
+    $("piForm").addEventListener("submit", submitPiForm);
+    $("piTestBtn").addEventListener("click", function () { refreshPiPreview(true); });
+    $("piPreviewRefresh").addEventListener("click", function () { refreshPiPreview(false); });
+    $("piExpAutoBtn").addEventListener("click", function () { setPiExpMode("auto"); });
+    $("piExpManualBtn").addEventListener("click", function () { setPiExpMode("manual"); });
+    $("piEvSlider").addEventListener("input", function () {
+      $("piEvOut").textContent = fmtEv(parseFloat(this.value));
+    });
+    $("piForm").addEventListener("input", refreshTabDots);
+    $("piForm").addEventListener("change", refreshTabDots);
+    $("piTabCam").addEventListener("click", function () { switchCamTab("pi", "main"); });
+    $("piTabDet").addEventListener("click", function () { switchCamTab("pi", "detection"); });
     $("rescanBtn").addEventListener("click", function () {
       api("/api/cameras/rescan", { method: "POST" }).then(function () {
         loadCameras(); loadStatus();
@@ -718,10 +1421,18 @@
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        closeModal();
-        closeCameraModal();
-        $("settingsModal").classList.add("hidden");
-        $("aboutModal").classList.add("hidden");
+        // Close only the topmost modal: Service settings stacks above
+        // the camera modals, which sit above the image modal.
+        if (!$("settingsModal").classList.contains("hidden")) {
+          $("settingsModal").classList.add("hidden");
+        } else if (!$("rtspCameraModal").classList.contains("hidden")) {
+          closeRtspModal();
+        } else if (!$("piCameraModal").classList.contains("hidden")) {
+          closePiModal();
+        } else {
+          closeModal();
+          $("aboutModal").classList.add("hidden");
+        }
       } else if (!$("modal").classList.contains("hidden")) {
         if (e.key === "ArrowLeft") modalStep(-1);
         if (e.key === "ArrowRight") modalStep(1);
@@ -762,7 +1473,7 @@
         // Don't yank the list out from under an open image modal;
         // refresh once the modal closes instead.
         if ($("modal").classList.contains("hidden")) {
-          loadEvents(true);
+          loadNewEvents();
         } else {
           state.eventsStale = true;
         }
@@ -771,6 +1482,7 @@
       } else if (msg.type === "frame") {
         loadLatest();
         loadCameras();
+        loadStatus(); // keep header (last inference, load) live
       } else if (msg.type === "config") {
         loadCameras();
         loadCounts();
@@ -780,6 +1492,7 @@
     };
     es.onerror = function () { /* EventSource auto-reconnects; onopen resyncs */ };
   }
+
 
   document.addEventListener("DOMContentLoaded", init);
 })();

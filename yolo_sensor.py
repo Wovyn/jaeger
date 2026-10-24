@@ -50,6 +50,18 @@ DEFAULT_WATCHLIST = ["person", "car", "truck", "bus",
 ICON_KEYS = ("camera", "door", "garage", "driveway",
              "garden", "entrance", "room", "board")
 MODELS = ("yolov8n", "yolov8s")
+# Asymmetric debounce: an appearance or any other count change publishes
+# after 2 consecutive inference cycles; a disappearance (count -> 0) needs
+# disappear_confirm_cycles consecutive empty cycles (per camera,
+# default 4, valid range 2..20).
+DISAPPEAR_CONFIRM_DEFAULT = 4
+DISAPPEAR_CONFIRM_MIN = 2
+DISAPPEAR_CONFIRM_MAX = 20
+# DISPLAY_FLOOR: inference runs at conf=min(threshold, DISPLAY_FLOOR) so
+# sub-threshold ("weak") detections reach the code; counts, events, MQTT
+# publishing and debounce still use the configured threshold. Weak boxes
+# are a Latest Frame diagnostic only: never stored, never published.
+DISPLAY_FLOOR = 0.25
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +173,7 @@ def default_camera_cfg(cam_id, cam_type, name):
            "paused": False, "rotate": 0,
            "resolution": [1280, 720], "sample_interval": 5.0,
            "imgsz": 640, "confidence_threshold": 0.5,
+           "disappear_confirm_cycles": DISAPPEAR_CONFIRM_DEFAULT,
            "watchlist": list(DEFAULT_WATCHLIST),
            "publish": {"classId": True, "className": True, "events": True},
            "heartbeat_interval": 600, "camera_controls": {}}
@@ -293,6 +306,14 @@ class PiCamera(Camera):
         time.sleep(2)  # let AEC/AGC settle
         self.apply_camera_controls(cfg.get("camera_controls", {}))
 
+    @property
+    def sensor_model(self):
+        """Best-effort sensor model from Picamera2 camera_properties."""
+        try:
+            return str(self._picam2.camera_properties.get("Model", "Unknown"))
+        except Exception:
+            return "Unknown"
+
     def capture(self):
         arr = self._picam2.capture_array()  # BGR888 -> BGR numpy array
         try:
@@ -375,10 +396,26 @@ class PiCamera(Camera):
 _FFMPEG_OPTS_LOCK = threading.Lock()
 
 
+def _ffmpeg_capture_options(transport):
+    # Build the OPENCV_FFMPEG_CAPTURE_OPTIONS string. OpenCV
+    # separates option pairs with a pipe character: each pair
+    # is key;value and pairs are joined by |. A semicolon
+    # between pairs is WRONG: FFmpeg then receives the whole
+    # tail as the first option value (observed: rtsp_transport
+    # got udp;analyzeduration;500000;probesize;500000 and the
+    # open failed).
+    return (f"rtsp_transport;{transport}|analyzeduration;500000"
+            f"|probesize;500000")
+
+
 def _open_capture(url, transport, timeout_s):
     """Open a cv2.VideoCapture for an RTSP URL.
 
     Transport is passed to FFmpeg via OPENCV_FFMPEG_CAPTURE_OPTIONS
+    (read by the OpenCV FFmpeg backend at open time). analyzeduration
+    and probesize are capped (0.5 s / 500 KB) so FFmpeg stream
+    probing cannot stall the open on slow cameras. Option pairs
+    are pipe-separated (see _ffmpeg_capture_options).
     (read by OpenCV's FFmpeg backend at open time); the env var is set
     under a lock and restored, so per-camera transports stay correct
     with concurrent capture threads. CAP_PROP_OPEN/READ_TIMEOUT_MSEC
@@ -393,7 +430,7 @@ def _open_capture(url, transport, timeout_s):
         with _FFMPEG_OPTS_LOCK:
             prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                f"rtsp_transport;{transport}")
+                _ffmpeg_capture_options(transport))
             try:
                 cap = cv2.VideoCapture()
                 cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
@@ -481,32 +518,38 @@ class RTSPCamera(Camera):
         return "rtsp"
 
     def _open(self):
+        # Open the RTSP stream. Returns (cap, open_seconds)
+        # or (None, open_seconds) on failure.
         url = build_rtsp_url(self.rtsp)  # never logged
+        t0 = time.time()
         cap, opened = _open_capture(
             url, self.rtsp.get("transport", "tcp"),
             int(self.rtsp.get("timeout_s", 10)))
+        open_s = round(time.time() - t0, 2)
         if not opened or cap is None:
             if cap is not None:
                 try:
                     cap.release()
                 except Exception:
                     pass
-            return None
-        return cap
+            return None, open_s
+        return cap, open_s
 
     def _read_with_keyframe_wait(self, cap, timeout_s):
         """Read until a decodable frame arrives (first frames after a
-        connect wait for a keyframe, typically 1-3 s)."""
+        connect wait for a keyframe, typically 1-3 s). Returns
+        (frame_or_None, wait_seconds)."""
+        t0 = time.time()
         deadline = time.time() + max(1.0, timeout_s)
         while time.time() < deadline:
             try:
                 ok, frame = cap.read()
             except Exception:
-                return None
+                return None, round(time.time() - t0, 2)
             if ok and frame is not None and frame.size:
-                return frame
+                return frame, round(time.time() - t0, 2)
             time.sleep(0.05)
-        return None
+        return None, round(time.time() - t0, 2)
 
     def capture(self):
         """One grab. Returns (frame, epoch) or None on failure.
@@ -523,7 +566,8 @@ class RTSPCamera(Camera):
         if snapshot_url:
             try:
                 frame = _snapshot_fetch(snapshot_url, timeout_s)
-                self._note_grab("snapshot", time.time() - t0, frame)
+                self._note_grab("snapshot", time.time() - t0, frame,
+                                0.0, time.time() - t0)
                 return frame, time.time()
             except RTSPTestError as e:
                 # Snapshot failed; RTSP is the fallback (DESIGN.md §15.2).
@@ -531,11 +575,11 @@ class RTSPCamera(Camera):
                       "falling back to RTSP", flush=True)
         mode = self.rtsp.get("connection_mode", "persistent")
         if mode == "per-capture":
-            cap = self._open()
+            cap, open_s = self._open()
             if cap is None:
                 return None
             try:
-                frame = self._read_with_keyframe_wait(cap, timeout_s)
+                frame, wait_s = self._read_with_keyframe_wait(cap, timeout_s)
             finally:
                 try:
                     cap.release()
@@ -543,14 +587,16 @@ class RTSPCamera(Camera):
                     pass
             if frame is None:
                 return None
-            self._note_grab("per-capture", time.time() - t0, frame)
+            self._note_grab("per-capture", time.time() - t0, frame,
+                            open_s, wait_s)
             return frame, time.time()
         # persistent
+        open_s = 0.0
         if self._cap is None:
-            self._cap = self._open()
+            self._cap, open_s = self._open()
             if self._cap is None:
                 return None
-        frame = self._read_with_keyframe_wait(self._cap, timeout_s)
+        frame, wait_s = self._read_with_keyframe_wait(self._cap, timeout_s)
         if frame is None:
             try:
                 self._cap.release()
@@ -558,17 +604,25 @@ class RTSPCamera(Camera):
                 pass
             self._cap = None
             return None
-        self._note_grab("persistent", time.time() - t0, frame)
+        self._note_grab("persistent", time.time() - t0, frame,
+                        open_s, wait_s)
         return frame, time.time()
 
-    def _note_grab(self, source, seconds, frame):
+    def _note_grab(self, source, seconds, frame,
+                   open_seconds=None, wait_seconds=None):
         try:
             h, w = frame.shape[:2]
             self.width, self.height = int(w), int(h)
         except Exception:
             pass
         self.last_grab_info = {"source": source,
-                               "seconds": round(seconds, 2)}
+                               "seconds": round(seconds, 2),
+                               "open_seconds": (round(open_seconds, 2)
+                                                if open_seconds is not None
+                                                else None),
+                               "wait_seconds": (round(wait_seconds, 2)
+                                                if wait_seconds is not None
+                                                else None)}
         self.fail_streak = 0
 
     def close(self):
@@ -729,6 +783,15 @@ def migrate_config(config):
             ccfg["icon"] = "camera"
         ccfg.setdefault("paused", False)
         ccfg.setdefault("rotate", 0)
+        dcc = ccfg.get("disappear_confirm_cycles",
+                       DISAPPEAR_CONFIRM_DEFAULT)
+        try:
+            dcc = int(dcc)
+        except (TypeError, ValueError):
+            dcc = DISAPPEAR_CONFIRM_DEFAULT
+        if not DISAPPEAR_CONFIRM_MIN <= dcc <= DISAPPEAR_CONFIRM_MAX:
+            dcc = DISAPPEAR_CONFIRM_DEFAULT
+        ccfg["disappear_confirm_cycles"] = dcc
         ccfg.setdefault("camera_controls", {})
         ccfg.setdefault("publish", {"classId": True, "className": True,
                                     "events": True})
@@ -773,6 +836,9 @@ class YoloSensor:
         self.config_path = CONFIG_PATH
         # Shared model (service-level, owned by the inference worker).
         self.model_name = config.get("model", "yolov8n")
+        # DISPLAY_FLOOR mirror for the web UI (avoids a circular import:
+        # yolo_sensor imports web_ui, so web_ui cannot import yolo_sensor).
+        self.display_floor = DISPLAY_FLOOR
         self.model_obj = None
         self.pending_model = None
         self.name_to_id = {}
@@ -929,14 +995,25 @@ class YoloSensor:
             "sample_interval": cfg.get("sample_interval", 5.0),
             "imgsz": cfg.get("imgsz", 640),
             "confidence_threshold": cfg.get("confidence_threshold", 0.5),
+            "disappear_confirm_cycles": cfg.get("disappear_confirm_cycles",
+                                                DISAPPEAR_CONFIRM_DEFAULT),
             "watchlist": cfg.get("watchlist", []),
             "publish": cfg.get("publish", {}),
             "heartbeat_interval": cfg.get("heartbeat_interval", 600),
             "camera_controls": cfg.get("camera_controls", {}),
             "rtsp": rtsp_out,
+            # Pi Sensor card: display-only detected info (None for RTSP).
+            "sensor_model": cam.get("sensor_model"),
+            "camera_port": cam.get("camera_port"),
             "last_capture_at": cam.get("last_capture_at"),
             "last_grab_at": cam.get("last_grab_at"),
             "last_grab_seconds": cam.get("last_grab_seconds"),
+            "last_grab_open_seconds": (
+                getattr(cam.get("obj"), "last_grab_info", None) or {}
+            ).get("open_seconds"),
+            "last_grab_wait_seconds": (
+                getattr(cam.get("obj"), "last_grab_info", None) or {}
+            ).get("wait_seconds"),
             "last_inference_at": cam.get("last_inference_at"),
             "last_inference_seconds": cam.get("last_inference_seconds"),
             "frame_seq": cam.get("slot_seq", 0),
@@ -1210,11 +1287,30 @@ class YoloSensor:
             changed = True
         if "heartbeat_interval" in cmd:
             cfg["heartbeat_interval"] = int(cmd["heartbeat_interval"]); changed = True
+        if "disappear_confirm_cycles" in cmd:
+            try:
+                dcc = int(cmd["disappear_confirm_cycles"])
+            except (TypeError, ValueError):
+                dcc = None
+            if dcc is None or not (DISAPPEAR_CONFIRM_MIN <= dcc
+                                   <= DISAPPEAR_CONFIRM_MAX):
+                print("[" + str(cam["id"]) + "] disappear_confirm_cycles invalid ("
+                      + repr(cmd["disappear_confirm_cycles"]) + "); using default "
+                      + str(DISAPPEAR_CONFIRM_DEFAULT), flush=True)
+                dcc = DISAPPEAR_CONFIRM_DEFAULT
+            cfg["disappear_confirm_cycles"] = dcc; changed = True
         if "publish" in cmd and isinstance(cmd["publish"], dict):
             cfg.setdefault("publish", {}).update(cmd["publish"]); changed = True
         if "camera_controls" in cmd and isinstance(cmd["camera_controls"], dict):
+            # Explicit nulls CLEAR a stored key (the Pi modal's Auto
+            # mode sends exposure_time/analogue_gain as null to return
+            # the camera to auto); a plain merge would retain them.
             merged = dict(cfg.get("camera_controls", {}))
-            merged.update(cmd["camera_controls"])
+            for k, v in cmd["camera_controls"].items():
+                if v is None:
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
             cfg["camera_controls"] = merged
             try:
                 if cam.get("obj") is not None:
@@ -1387,6 +1483,13 @@ class YoloSensor:
         self.save_config()
         cam = self._make_runtime_cam(ccfg, RTSPCamera(ccfg))
         self.cameras.append(cam)
+        # Detection fields ride along with the Add body (the shared
+        # Detection tab); apply them through the same path as edits.
+        det = {k: body[k] for k in ("confidence_threshold", "imgsz",
+                                    "heartbeat_interval", "publish",
+                                    "watchlist", "disappear_confirm_cycles") if k in body}
+        if det:
+            self.apply_config_command(cam, det)
         self.start_capture_thread(cam)
         self.publish_service_config()
         self.publish_camera_config(cam)
@@ -1405,9 +1508,8 @@ class YoloSensor:
         cam = self._find_cam(cam_id)
         if cam is None:
             raise ValueError(f"unknown camera {cam_id}")
-        if cam["cfg"].get("type") != "rtsp":
-            raise ValueError("only RTSP cameras are editable here; "
-                             "use Settings for the Pi camera")
+        if cam["cfg"].get("type") == "picamera":
+            return self._edit_picamera(cam, body)
         fields, rtsp = normalize_camera_form(body)
         self._check_name_unique(fields["name"], exclude_id=cam_id)
         ccfg = cam["cfg"]
@@ -1429,6 +1531,13 @@ class YoloSensor:
         ccfg["rotate"] = fields["rotate"]
         ccfg["sample_interval"] = fields["sample_interval"]
         ccfg["rtsp"] = rtsp
+        # Detection fields ride along with the Edit body (the shared
+        # Detection tab); apply them through the same path as config.
+        det = {k: body[k] for k in ("confidence_threshold", "imgsz",
+                                    "heartbeat_interval", "publish",
+                                    "watchlist", "disappear_confirm_cycles") if k in body}
+        if det:
+            self.apply_config_command(cam, det)
         if connection_changed:
             print(f"[{cam_id}] connection changed; "
                   "restarting capture thread", flush=True)
@@ -1442,6 +1551,42 @@ class YoloSensor:
         self.publish_camera_config(cam)
         self.notify_stream({"type": "config", "camera_id": cam_id})
         print(f"[{cam_id}] camera edited", flush=True)
+        return self.camera_config_payload(cam)
+
+    def _edit_picamera(self, cam, body):
+        """Edit the Pi camera: identity + detection + camera controls.
+        No connection test (local camera); no delete (enforced by the
+        web layer)."""
+        cam_id = cam["id"]
+        ccfg = cam["cfg"]
+        name = body.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("camera name is required")
+        self._check_name_unique(name.strip(), exclude_id=cam_id)
+        ccfg["name"] = name.strip()
+        icon = body.get("icon")
+        if icon in ICON_KEYS:
+            ccfg["icon"] = icon
+        rotate = body.get("rotate")
+        if rotate is not None and int(rotate) in (0, 90, 180, 270):
+            ccfg["rotate"] = int(rotate)
+        # start_paused from the modal maps to the paused flag.
+        paused = body.get("start_paused", body.get("paused"))
+        if paused is not None:
+            if bool(paused) and not ccfg.get("paused", False):
+                self._apply_pause(cam)
+            elif not bool(paused) and ccfg.get("paused", False):
+                self._apply_resume(cam)
+        det = {k: body[k] for k in ("confidence_threshold", "imgsz",
+                                    "heartbeat_interval", "publish",
+                                    "watchlist", "disappear_confirm_cycles", "sample_interval",
+                                    "camera_controls") if k in body}
+        if det:
+            self.apply_config_command(cam, det)
+        self.save_config()
+        self.publish_camera_config(cam)
+        self.notify_stream({"type": "config", "camera_id": cam_id})
+        print(f"[{cam_id}] Pi camera edited", flush=True)
         return self.camera_config_payload(cam)
 
     def _apply_pause(self, cam):
@@ -1573,13 +1718,19 @@ class YoloSensor:
             print(f"[{cam['id']}] empty watchlist, skipping", flush=True)
             return
         t0 = time.time()
+        threshold = cfg.get("confidence_threshold", 0.5)
+        # Run the model at the display floor so sub-threshold ("weak")
+        # detections reach the code; confirmed counts/events/MQTT still
+        # use the configured threshold.
+        infer_conf = threshold if threshold < DISPLAY_FLOOR else DISPLAY_FLOOR
         results = self.model_obj(frame, classes=cam["watch_ids"],
-                                 conf=cfg.get("confidence_threshold", 0.5),
+                                 conf=infer_conf,
                                  imgsz=cfg.get("imgsz", 640),
                                  verbose=False)[0]
         h, w = frame.shape[:2]
         counts = {cid: 0 for cid in cam["watch_ids"]}
         dets = {cid: [] for cid in cam["watch_ids"]}
+        weak = []
         if results.boxes is not None:
             for box in results.boxes:
                 cid = int(box.cls[0])
@@ -1587,20 +1738,41 @@ class YoloSensor:
                     continue
                 c = float(box.conf[0])
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                counts[cid] += 1
-                dets[cid].append({
+                entry = {
                     "confidence": round(c, 3),
                     "bbox": [round(x1 / w, 4), round(y1 / h, 4),
-                             round(x2 / w, 4), round(y2 / h, 4)]})
+                             round(x2 / w, 4), round(y2 / h, 4)]}
+                if c >= threshold:
+                    counts[cid] += 1
+                    dets[cid].append(entry)
+                elif c >= DISPLAY_FLOOR:
+                    weak.append({"class": cam["id_to_name"][cid],
+                                 "confidence": entry["confidence"],
+                                 "bbox": entry["bbox"]})
         cam["last_inference_seconds"] = round(time.time() - t0, 2)
+        # Latest-frame diagnostic state, refreshed every cycle even when
+        # nothing is confirmed. Weak boxes are never stored or published.
+        cam["latest_dets"] = {cam["id_to_name"][cid]: dets[cid]
+                              for cid in cam["watch_ids"]}
+        cam["latest_weak"] = weak
         cam["last_inference_at"] = utcnow_iso()
         self.last_cycle_seconds = cam["last_inference_seconds"]
         self.last_cycle_at = cam["last_inference_at"]
-        # Confirm-2 debounce: a count change counts only after the same
-        # value is observed in 2 consecutive inference cycles. A 1-cycle
-        # flicker (e.g. a marginal detection blinking around the
-        # threshold) is swallowed; a real change is delayed one cycle.
+        # Asymmetric debounce: an appearance or any other count change
+        # publishes after the same value is seen in 2 consecutive
+        # inference cycles; a disappearance (count -> 0) needs
+        # disappear_confirm_cycles consecutive empty cycles. While a
+        # disappearance is pending, last_counts keeps the old value, so
+        # the counts panel, /api/counts and MQTT keep showing it.
         pending = cam.setdefault("pending_changes", {})
+        disappear_n = cfg.get("disappear_confirm_cycles",
+                              DISAPPEAR_CONFIRM_DEFAULT)
+        try:
+            disappear_n = int(disappear_n)
+        except (TypeError, ValueError):
+            disappear_n = DISAPPEAR_CONFIRM_DEFAULT
+        if not DISAPPEAR_CONFIRM_MIN <= disappear_n <= DISAPPEAR_CONFIRM_MAX:
+            disappear_n = DISAPPEAR_CONFIRM_DEFAULT
         changed = []
         for cid in cam["watch_ids"]:
             if counts[cid] != cam["last_counts"][cid]:
@@ -1609,7 +1781,8 @@ class YoloSensor:
                     prev["seen"] += 1
                 else:
                     pending[cid] = {"count": counts[cid], "seen": 1}
-                if pending[cid]["seen"] >= 2:
+                need = disappear_n if counts[cid] == 0 else 2
+                if pending[cid]["seen"] >= need:
                     changed.append(cid)
             else:
                 pending.pop(cid, None)
@@ -1736,11 +1909,21 @@ class YoloSensor:
         status = "paused" if ccfg.get("paused") else "online"
         if obj is None:
             status = "offline"
+        # Pi Sensor card: display-only detected info. Picamera2() with
+        # no args opens camera_num 0 by construction, i.e. CSI 0.
+        if ccfg.get("type") == "picamera" and obj is not None:
+            sensor_model = getattr(obj, "sensor_model", "Unknown")
+            camera_port = "CSI 0"
+        else:
+            sensor_model = None
+            camera_port = None
         cam = {"id": ccfg["id"], "cfg": ccfg, "obj": obj,
+               "sensor_model": sensor_model, "camera_port": camera_port,
                "name_to_id": self.name_to_id,
                "id_to_name": self.id_to_name,
                "watch_ids": [], "last_counts": {},
                "pending_changes": {},
+               "latest_dets": {}, "latest_weak": [],
                "status": status, "status_reason": None,
                "paused": bool(ccfg.get("paused", False)),
                "slot": None, "slot_ts": None, "slot_seq": 0,

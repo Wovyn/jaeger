@@ -42,7 +42,7 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 #cameraList .cam-controls button.danger:hover { background: #fee2e2; }
 #cameraList .cam-meta .dot { width: 9px; height: 9px; margin-right: 0.3em; }
 .load-indicator { font-size: 0.85em; color: #555; margin: -0.4em 0 0.6em; }
-.load-indicator.warn { color: #b45309; font-weight: bold; }
+.load-indicator.warn { display: block; text-align: center; font-weight: 700; background: #dc2626; color: #fff; border-radius: 6px; padding: 0.35em 0.5em; }
 .empty-state { font-size: 0.9em; color: #555; border: 1px dashed #bbb;
   border-radius: 6px; padding: 0.8em; margin-bottom: 0.6em; }
 #addCameraBtn { font-size: 1.4em; color: #2563eb; background: #eef4ff;
@@ -72,13 +72,14 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 #eventsEnd { text-align: center; color: #777; padding: 1em; }
 
 /* Modals */
-#modal, #settingsModal, #aboutModal, #cameraModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+#modal, #settingsModal, #aboutModal, #rtspCameraModal, #piCameraModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal-box { background: #fff; border-radius: 8px; padding: 1.2em; max-width: 92vw;
   max-height: 92vh; overflow: auto; position: relative; }
-.about-box { width: min(90vw, 480px); aspect-ratio: 1 / 1; }
+.about-box { width: min(92vw, 720px); max-height: 92vh; overflow-y: auto; }
 .about-logo { display: block; width: 96px; height: 96px; margin: 0 auto 0.6em; }
-#modalClose, #settingsClose, #aboutClose, #cameraClose { position: absolute; top: 0.4em; right: 0.6em;
+.about-wovyn-logo { display: block; width: 180px; max-width: 80%; height: auto; margin: 0.8em auto 0.4em; }
+#modalClose, #settingsClose, #aboutClose, #rtspClose, #piClose { position: absolute; top: 0.4em; right: 0.6em;
   font-size: 1.4em; background: none; border: none; cursor: pointer; z-index: 10; }
 #modalClose { background: rgba(0,0,0,0.6); color: #fff; border-radius: 50%;
   width: 1.6em; height: 1.6em; line-height: 1.6em; text-align: center; padding: 0; }
@@ -91,20 +92,6 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 .modal-controls { display: flex; gap: 1em; align-items: center; justify-content: center;
   margin-top: 0.6em; }
 #modalCaption { text-align: center; font-size: 0.9em; color: #444; margin-top: 0.4em; }
-#settingsForm label, #cameraForm label { display: block; margin: 0.6em 0; }
-#settingsForm input[type="number"], #settingsForm select,
-#cameraForm input[type="text"], #cameraForm input[type="number"],
-#cameraForm input[type="password"], #cameraForm select { width: 100%; padding: 0.3em; }
-#cameraForm fieldset, #settingsForm fieldset { margin: 0.8em 0; border: 1px solid #ddd;
-  border-radius: 6px; padding: 0.2em 0.9em 0.8em; }
-.checkbox-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.2em 0.8em; }
-.checkbox-grid label { margin: 0; font-size: 0.9em; }
-.icon-picker { display: flex; gap: 0.4em; flex-wrap: wrap; }
-.icon-picker button { width: 44px; height: 44px; padding: 4px; cursor: pointer;
-  background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; }
-.icon-picker button.selected { border-color: #2563eb; background: #eef4ff; }
-.icon-picker svg { width: 32px; height: 32px; }
-.icon-picker .icon-label { display: block; font-size: 0.65em; text-align: center; color: #555; }
 .test-result { display: flex; gap: 0.8em; align-items: center; border: 1px solid #bbf7d0;
   background: #f0fdf4; border-radius: 6px; padding: 0.6em; margin: 0.6em 0; }
 .test-result img { width: 160px; height: auto; border-radius: 4px; background: #222; }
@@ -116,5 +103,186 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; }
   #eventsList img { width: 110px; }
-  .checkbox-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Camera modals (v0.3.0 redesign): tabbed RTSP + Pi modals and
+   system-wide Service settings. Design tokens from the mockups:
+   text #1D2228, labels #3B4048, secondary #5E6670/#6B737D,
+   primary #2F5D8A, borders #E3E6EA/#C9CED4, panel #F7F8FA,
+   card #FFFFFF, radii 6/8/10/12. System font stack (no web fonts). */
+#rtspCameraModal, #piCameraModal { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 50; }
+#settingsModal { z-index: 60; } /* Service settings stacks above camera modals */
+.cam-modal-box { max-width: 1000px; width: 96vw; max-height: 90vh; overflow-y: auto;
+  padding: 0; border-radius: 12px; }
+.svc-modal-box { max-width: 600px; width: 96vw; max-height: 90vh; overflow-y: auto;
+  padding: 0; border-radius: 12px; }
+.cam-modal-box form, .svc-modal-box form { background: #F7F8FA; }
+.cam-modal-head { padding: 18px 24px 4px; }
+.cam-eyebrow { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #5E6670; font-weight: 600; }
+.cam-modal-head h2 { margin: 4px 0 0; font-size: 20px; font-weight: 600; color: #1D2228; }
+.tab-bar { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid #E3E6EA; }
+.tab-btn { height: 44px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; font-size: 14px; font-weight: 500; color: #5E6670; cursor: pointer;
+  margin-bottom: -1px; }
+.tab-btn.active { border-bottom-color: #2F5D8A; font-weight: 600; color: #1D2228; }
+.tab-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #dc2626; margin-left: 6px; vertical-align: middle; }
+.tab-panel { padding: 20px 24px; background: #F7F8FA; }
+.cam-form-row1 { display: flex; gap: 20px; align-items: flex-end; background: #fff;
+  border: 1px solid #E3E6EA; border-radius: 10px; padding: 14px 16px 16px; margin-bottom: 18px; }
+.cam-name-field { width: 280px; flex: none; }
+.cam-name-field input[type="text"] { width: 100%; height: 36px; border: 1px solid #C9CED4;
+  border-radius: 6px; padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
+.cam-field-label { display: block; font-size: 13px; font-weight: 500; color: #3B4048; margin-bottom: 6px; }
+.cam-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 18px; align-items: start; }
+.cam-form-right, .cam-form-col { display: flex; flex-direction: column; gap: 18px; }
+.cam-card { background: #fff; border: 1px solid #E3E6EA; border-radius: 10px;
+  padding: 14px 16px 16px; margin: 0; position: relative; }
+.cam-card legend { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #5E6670; padding: 0 4px; }
+.cam-card label { display: block; font-size: 13px; font-weight: 500; color: #3B4048; margin-bottom: 10px; }
+.cam-card label:last-child { margin-bottom: 0; }
+.cam-card input[type="text"], .cam-card input[type="number"], .cam-card input[type="password"],
+.cam-card select { width: 100%; height: 36px; border: 1px solid #C9CED4; border-radius: 6px;
+  padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
+.cam-card .hint { display: block; margin-top: 6px; font-size: 12px; color: #6B737D; line-height: 1.4; }
+.cam-card .form-row { display: flex; gap: 12px; align-items: flex-start; }
+.cam-card .form-row > label { flex: 1; min-width: 0; }
+.cam-card .fld-scheme { flex: 0 0 110px; }
+.cam-card .fld-port { flex: 0 0 90px; }
+.cam-card .fld-mode { flex: 2; }
+.cam-card .fld-timeout { flex: 0 0 110px; }
+.cam-card .fld-check { display: flex; align-items: center; gap: 0.4em; padding-top: 24px; }
+.cam-card.has-check { padding-top: 2.1em; }
+.card-check { position: absolute; top: 0.55em; right: 1em; margin: 0; font-size: 13px;
+  font-weight: 500; color: #3B4048; }
+.resolved-url { background: #F7F8FA; border: 1px solid #E3E6EA; border-radius: 8px;
+  padding: 10px 12px; margin-top: 12px; }
+.resolved-label { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #5E6670; margin-bottom: 4px; }
+.resolved-url code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; color: #1D2228; word-break: break-all; }
+.suffix-input { display: flex; align-items: center; border: 1px solid #C9CED4; border-radius: 6px;
+  background: #fff; height: 36px; padding: 0 10px; }
+.suffix-input input { border: 0 !important; padding: 0 !important; height: 100%; width: 100%;
+  font-size: 14px; color: #1D2228; background: transparent; }
+/* Inside a suffix wrapper the input sizes to its content and centers via
+   flex; the 36px field height would overflow the wrapper's 34px content box. */
+.det-card .suffix-input input[type="number"] { height: auto; }
+.suffix-input > span { font-size: 13px; color: #6B737D; margin-left: 6px; white-space: nowrap; }
+.slider-row { display: flex; align-items: center; gap: 10px; height: 36px; }
+.slider-row input[type="range"] { flex: 1; accent-color: #2F5D8A; }
+.readout { width: 44px; height: 30px; flex: none; display: inline-flex; align-items: center;
+  justify-content: center; border: 1px solid #C9CED4; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: #1D2228; }
+.icon-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+.icon-picker button { width: 40px; height: 36px; padding: 4px; cursor: pointer;
+  background: #fff; border: 1px solid #D5D9DE; border-radius: 6px; color: #3B4048; }
+.icon-picker button.selected { border: 1.5px solid #2F5D8A; background: #E8EFF6; color: #2F5D8A; }
+.icon-picker svg { width: 20px; height: 20px; }
+.icon-picker .icon-label { display: none; }
+
+/* Pi Sensor card: read-only detected info (no editing). */
+.sensor-status { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #1D2228; margin-bottom: 12px; }
+.ro-field { display: flex; align-items: center; height: 36px; padding: 0 10px; border: 1px solid #E3E6EA;
+  border-radius: 6px; background: #F7F8FA; font-size: 14px; font-weight: 400; color: #1D2228; }
+.seg-row { margin-bottom: 12px; }
+.seg { display: inline-flex; background: #EEF0F3; border-radius: 8px; padding: 3px; gap: 2px; }
+.seg-btn { height: 30px; padding: 0 16px; border: 0; border-radius: 6px; background: transparent;
+  font-size: 13px; font-weight: 500; color: #4A515A; cursor: pointer; }
+.seg-btn.active { background: #fff; font-weight: 600; color: #1D2228; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+.pi-preview { position: relative; aspect-ratio: 4 / 3; border-radius: 8px; background: #2A2F36; overflow: hidden; margin-bottom: 6px; }
+.pi-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pi-preview button { position: absolute; right: 10px; bottom: 10px; height: 32px; padding: 0 12px;
+  border: 1px solid #C9CED4; border-radius: 6px; background: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
+
+/* Shared Detection tab (one instance, moved between camera modals). */
+.det-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 18px; align-items: start; }
+.det-left { display: flex; flex-direction: column; gap: 18px; }
+.det-card { background: #fff; border: 1px solid #E3E6EA; border-radius: 10px; padding: 14px 16px 16px; }
+.det-card h3 { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #5E6670; margin: 0 0 12px; }
+.det-row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.det-field { display: block; font-size: 13px; font-weight: 500; color: #3B4048; }
+.det-narrow { flex: 0 0 150px; }
+.det-grow { flex: 1; min-width: 0; }
+.det-card input[type="number"], .det-card select { width: 100%; height: 36px; border: 1px solid #C9CED4;
+  border-radius: 6px; padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
+.det-card .hint { font-size: 12px; color: #6B737D; line-height: 1.4; }
+.det-publish { display: flex; gap: 18px; flex-wrap: wrap; }
+.det-publish label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: #3B4048; }
+.det-note { border: 1px dashed #C9CED4; border-radius: 10px; padding: 12px 14px; font-size: 12.5px;
+  line-height: 1.45; color: #4A515A; background: #fff; }
+.det-note a { color: #2F5D8A; }
+.det-watch { display: flex; flex-direction: column; max-height: 70vh; }
+.det-watch-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.det-watch-head h3 { margin: 0; }
+.det-watch-count { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; color: #5E667D; }
+.det-watch-count button { border: 0; background: none; color: #2F5D8A; cursor: pointer; font-size: 12.5px; }
+.det-watch-tools { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
+.det-search { flex: 1; }
+.det-search input { width: 100%; height: 36px; border: 1px solid #C9CED4; border-radius: 6px;
+  padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
+.det-watch-tools label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #3B4048; white-space: nowrap; }
+.det-watch-groups { overflow-y: auto; margin: 0 -16px; padding: 0 16px 12px; }
+.det-group-row { display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid #EEF0F3; }
+.det-group-head { flex: 0 0 96px; display: flex; flex-direction: column; gap: 2px; }
+.det-group-name { font-size: 12px; font-weight: 600; color: #3B4048; }
+.det-group-count { font-size: 12px; color: #6B737D; }
+.det-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.det-chip { height: 28px; display: inline-flex; align-items: center; padding: 0 10px; border: 1px solid #D5D9DE;
+  background: #fff; color: #3B4048; border-radius: 14px; font-size: 13px; cursor: pointer; }
+.det-chip.selected { border-color: #2F5D8A; background: #2F5D8A; color: #fff; }
+.det-watch-empty { padding: 12px 0; font-size: 13px; color: #6B737D; }
+.dim { color: #6B737D; font-weight: 400; }
+
+/* Service settings (system-wide only). */
+.svc-head { padding: 18px 24px 12px; border-bottom: 1px solid #E3E6EA; }
+.svc-badge { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: #8A4B0F; background: #FCEFDF; border-radius: 4px; padding: 2px 6px; }
+.svc-head h2 { margin: 8px 0 0; font-size: 20px; font-weight: 600; color: #1D2228; }
+.svc-body { padding: 20px 24px; background: #F7F8FA; display: flex; flex-direction: column; gap: 16px; }
+.svc-card { background: #fff; border: 1px solid #E3E6EA; border-radius: 10px; padding: 14px 16px 16px; }
+.svc-card label { display: block; font-size: 13px; font-weight: 500; color: #3B4048; margin-bottom: 6px; }
+.svc-card select, .svc-card input[type="number"] { height: 36px; border: 1px solid #C9CED4; border-radius: 6px;
+  padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
+.svc-card select { width: 100%; }
+.svc-card .hint { font-size: 12px; color: #6B737D; line-height: 1.4; margin: 8px 0 0; }
+.svc-limit-row { display: flex; gap: 18px; align-items: flex-end; }
+.svc-limit-row > label { flex: 0 0 200px; margin-bottom: 0; }
+.svc-inuse { flex: 1; min-width: 0; }
+.svc-inuse-top { display: flex; justify-content: space-between; font-size: 12px; color: #5E667D; margin-bottom: 6px; }
+.svc-bar { height: 8px; background: #E3E6EA; border-radius: 4px; overflow: hidden; }
+.svc-bar div { height: 100%; background: #2F5D8A; width: 0%; transition: width 0.2s; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* Modal footers (camera modals + service settings). */
+.cam-modal-box .form-actions, .svc-modal-box .form-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 14px 24px; border-top: 1px solid #E3E6EA; margin-top: 0; background: #fff; }
+.form-actions-left { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.form-actions-right { display: flex; gap: 10px; }
+.cam-modal-box .form-actions button, .svc-modal-box .form-actions button {
+  height: 40px; padding: 0 16px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.cam-modal-box .form-actions button[type="submit"], .svc-modal-box .form-actions button[type="submit"] {
+  background: #2F5D8A; color: #fff; border: 1px solid #2F5D8A; font-weight: 600; }
+.cam-modal-box .form-actions button:not([type="submit"]), .svc-modal-box .form-actions button:not([type="submit"]) {
+  background: #fff; color: #1D2228; border: 1px solid #C9CED4; }
+.svc-modal-box .form-actions { justify-content: flex-end; }
+.cam-modal-box .test-result { margin: 0 24px; }
+.cam-modal-box .error, .svc-modal-box .error { padding: 0 24px; }
+
+@media (max-width: 900px) {
+  .cam-form-grid, .det-grid { grid-template-columns: 1fr; }
+  .cam-form-row1 { flex-direction: column; align-items: stretch; }
+  .cam-name-field { width: 100%; }
+  .cam-card .form-row, .det-row { flex-direction: column; }
+  .det-narrow { flex: 1; }
+  .svc-limit-row { flex-direction: column; align-items: stretch; }
+  .svc-limit-row > label { flex: 1; }
+}
+@media (max-width: 600px) {
+  .form-actions-left .hint { display: none; }
 }
