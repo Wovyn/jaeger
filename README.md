@@ -1,4 +1,4 @@
-# muse-pi-yolo-mqtt
+# Jaeger
 
 Intelligent object recognition and notification on the Raspberry Pi: cameras
 capture frames at a low rate, YOLOv8 detects objects, results publish to MQTT
@@ -19,7 +19,7 @@ camera lifecycle APIs, Jaeger MQTT tree. A v0.3.0 follow-up committed Oct 23,
 2026 (version unchanged) added the tabbed camera modals and slimmed Service
 settings, asymmetric debounce + weak detections, the event-image Download
 button, and the Detection-tab / About-dialog fixes (including the Wovyn logo).
-The production service runs v0.3.0. See DESIGN.md section 15 for the design.
+Repository renamed to Wovyn/jaeger Oct 24, 2026 (local folder ~/projects/jaeger). The production service runs v0.3.0. See DESIGN.md section 15 for the design.
 
 ## Hardware
 
@@ -73,8 +73,8 @@ non-IMX219 ArduCam modules need their own overlay or driver.
 ## 2. Python environment
 
 ```bash
-python3 -m venv ~/projects/muse-pi-yolo-mqtt/venv
-~/projects/muse-pi-yolo-mqtt/venv/bin/pip install --upgrade pip
+python3 -m venv ~/projects/jaeger/venv
+~/projects/jaeger/venv/bin/pip install --upgrade pip
 ```
 
 ### torch (CPU) — install FIRST, from the PyTorch CPU index
@@ -84,7 +84,7 @@ NVIDIA packages, ~3 GB total, very slow) — useless on a Pi. Install the CPU bu
 first:
 
 ```bash
-V=~/projects/muse-pi-yolo-mqtt/venv/bin
+V=~/projects/jaeger/venv/bin
 $V/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
@@ -95,7 +95,7 @@ $V/pip install torch torchvision --index-url https://download.pytorch.org/whl/cp
 ### Everything else
 
 ```bash
-V=~/projects/muse-pi-yolo-mqtt/venv/bin
+V=~/projects/jaeger/venv/bin
 $V/pip install ultralytics paho-mqtt
 ```
 
@@ -120,10 +120,10 @@ The venv must see the system package — recreate it with system site packages
 and reinstall (pip's cache makes the reinstall fast):
 
 ```bash
-rm -rf ~/projects/muse-pi-yolo-mqtt/venv
-python3 -m venv --system-site-packages ~/projects/muse-pi-yolo-mqtt/venv
+rm -rf ~/projects/jaeger/venv
+python3 -m venv --system-site-packages ~/projects/jaeger/venv
 # repeat the torch / ultralytics / paho-mqtt installs above, then:
-~/projects/muse-pi-yolo-mqtt/venv/bin/python -c "import picamera2; print('picamera2 ok')"
+~/projects/jaeger/venv/bin/python -c "import picamera2; print('picamera2 ok')"
 ```
 
 Status Oct 13: installed via apt, venv rewired with --system-site-packages,
@@ -137,8 +137,8 @@ Both nano and small are installed; one model is shared by all cameras and is
 selectable at runtime (default: nano) via the Settings modal (service-level).
 
 ```bash
-mkdir -p ~/projects/muse-pi-yolo-mqtt/models && cd ~/projects/muse-pi-yolo-mqtt/models
-~/projects/muse-pi-yolo-mqtt/venv/bin/python -c \
+mkdir -p ~/projects/jaeger/models && cd ~/projects/jaeger/models
+~/projects/jaeger/venv/bin/python -c \
   "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8s.pt')"
 ls -la
 # yolov8n.pt ~= 6.2 MB, yolov8s.pt ~= 21.5 MB
@@ -149,12 +149,12 @@ ls -la
 Proves the full chain: capture → inference.
 
 ```bash
-V=~/projects/muse-pi-yolo-mqtt/venv/bin
+V=~/projects/jaeger/venv/bin
 rpicam-still -t 1500 -o /tmp/yolo-smoke.jpg
 $V/python - <<'EOF2'
 from ultralytics import YOLO
 import time
-m = YOLO('/home/musecell/projects/muse-pi-yolo-mqtt/models/yolov8n.pt')
+m = YOLO('/home/musecell/projects/jaeger/models/yolov8n.pt')
 t = time.time()
 r = m('/tmp/yolo-smoke.jpg', verbose=False)[0]
 print('inference ms:', round((time.time() - t) * 1000))
@@ -178,7 +178,7 @@ Credentials live in `~/Documents/HiveMQ.txt` (never in git). Generate the
 service config from it — secrets never leave the Pi:
 
 ```bash
-cd ~/projects/muse-pi-yolo-mqtt
+cd ~/projects/jaeger
 ./venv/bin/python setup_config.py
 # writes config.json with mode 0600
 ```
@@ -206,7 +206,7 @@ from the existing camera ids. The config is re-saved automatically.
 ### Run in the foreground (test)
 
 ```bash
-cd ~/projects/muse-pi-yolo-mqtt && ./venv/bin/python yolo_sensor.py
+cd ~/projects/jaeger && ./venv/bin/python yolo_sensor.py
 ```
 
 The service opens the cameras, loads the shared model, connects to HiveMQ
@@ -325,7 +325,7 @@ Selective consumers sharing the cameras + inference:
 ## 8. Project layout
 
 ```
-muse-pi-yolo-mqtt/
+jaeger/
 ├── README.md             this file
 ├── DESIGN.md             plan & design (topic tree, multi-camera design §15)
 ├── CHANGELOG.md          release history

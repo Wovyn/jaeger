@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jaeger (muse-pi-yolo-mqtt) service v0.3.0.
+"""Jaeger service v0.3.0.
 
 Captures frames from configured cameras, runs YOLOv8 object detection, and
 publishes per-class counts/details to MQTT only when the scene changes.
@@ -953,7 +953,7 @@ class YoloSensor:
     def service_config_payload(self):
         """Pi-level retained config: service identity + camera list."""
         return {
-            "service": "muse-pi-yolo-mqtt", "version": VERSION,
+            "service": "jaeger", "version": VERSION,
             "cpu_serial": self.serial, "start_time": self.started_at,
             "model": self.model_name,
             "cameras": [{"id": c["id"], "name": c["cfg"].get("name", c["id"]),
@@ -979,7 +979,7 @@ class YoloSensor:
             rtsp_out = {k: v for k, v in rtsp.items() if k != "password"}
             rtsp_out["has_password"] = bool(rtsp.get("password"))
         return {
-            "service": "muse-pi-yolo-mqtt", "version": VERSION,
+            "service": "jaeger", "version": VERSION,
             "cpu_serial": self.serial,
             "camera_id": cam["id"], "name": cam["cfg"].get("name", cam["id"]),
             "type": cfg.get("type", "picamera"),

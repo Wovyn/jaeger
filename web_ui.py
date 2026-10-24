@@ -1,4 +1,4 @@
-"""Jaeger web UI (v0.3.0): embedded HTTP server for muse-pi-yolo-mqtt.
+"""Jaeger web UI (v0.3.0): embedded HTTP server for Jaeger.
 
 Serves the static UI plus a small JSON API backed by the live YoloSensor
 object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).

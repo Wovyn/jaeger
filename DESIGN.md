@@ -1,4 +1,4 @@
-# muse-pi-yolo-mqtt — Plan & Design (v0.1, v0.2.0, v0.3.0)
+# Jaeger — Plan & Design (v0.1, v0.2.0, v0.3.0)
 
 Status: v0.1.0 built and pushed Oct 14, 2026; v0.2.0 built and committed Oct 14, 2026, live testing in progress; v0.2.1 (UI fixes from testing feedback) built and committed Oct 16, 2026; v0.3.0 (RTSP + multi-camera) built and committed Oct 16, 2026, running live (topic tree: v0.3.0 Jaeger tree, Oct 16; multi-camera design Oct 13).
 
@@ -56,7 +56,7 @@ frames, cloud upload.
   publish toggles). Remote changes via MQTT persist back to config.json.
 - systemd unit `yolo-mqtt.service` — auto-start, restart on failure,
   runs as musecell (no sudo at runtime).
-- Python venv at `~/projects/muse-pi-yolo-mqtt/venv`, created with
+- Python venv at `~/projects/jaeger/venv`, created with
   `--system-site-packages` so it sees the apt-installed picamera2.
 - `models/` — yolov8n.pt and yolov8s.pt (both installed, selectable).
 - `buffer/<camera-id>/` — per-camera ring-buffer JPEGs (gitignored).
@@ -65,7 +65,7 @@ frames, cloud upload.
 
 1. Verify camera: `rpicam-hello --list-cameras`; test still capture.
 2. `sudo apt update && sudo apt install -y python3-picamera2`.
-3. `python3 -m venv --system-site-packages ~/projects/muse-pi-yolo-mqtt/venv`
+3. `python3 -m venv --system-site-packages ~/projects/jaeger/venv`
    then pip install (see README for the torch CPU-index details — IMPORTANT:
    default PyPI pulls the ~3 GB CUDA-bundled torch, useless on a Pi; install
    torch+torchvision from https://download.pytorch.org/whl/cpu FIRST, then
@@ -238,7 +238,7 @@ published class change occurs for that camera (no publish → no store).
 
 ## 13. v0.2.0 - Jaeger web UI (DECIDED Oct 14, 2026; built Oct 14, 2026, committed Oct 14, 2026; live testing in progress)
 
-- Project evolves to Jaeger (play on Frigate, a smaller version). Header shows Jaeger + version from one code constant. Repo/folder keep muse-pi-yolo-mqtt for now.
+- Project evolves to Jaeger (play on Frigate, a smaller version). Header shows Jaeger + version from one code constant. Repo/folder renamed to jaeger Oct 24, 2026 (was muse-pi-yolo-mqtt).
 - Web UI on port 8082. Embedded ThreadingHTTPServer thread in yolo_sensor.py (stdlib only, static HTML/JS/CSS). One config writer shared with the MQTT config/set path.
 - Layout: header (Jaeger + version, hamburger menu right). Left 50 percent: cameras list (selected camera) + counts panel for the selected camera. Right 50 percent: events list.
 - Cameras panel: name, type, resolution, status dot, last capture time. Greyed [+] add-camera placeholder, disabled, tooltip RTSP coming soon.

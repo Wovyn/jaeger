@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Repository renamed Wovyn/muse-pi-yolo-mqtt -> Wovyn/jaeger (Oct 24, 2026, in place on GitHub); local folder now ~/projects/jaeger, MQTT service identity now "jaeger", docs and service paths updated. No version change; MQTT topic tree unchanged (already Jaeger).
 
 ## [0.3.0] - 2026-10-16
 
