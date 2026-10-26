@@ -25,6 +25,11 @@ main { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; padding: 1em;
   max-width: 1600px; margin: 0 auto; }
 section { background: #fff; border-radius: 8px; padding: 1em; margin-bottom: 1em; }
 section h2 { margin-top: 0; font-size: 1.15em; }
+.events-header-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5em; }
+.events-header-row h2 { margin: 0; }
+.mqtt-warn { display: inline-flex; align-items: center; gap: 0.4em; background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; border-radius: 6px; padding: 0.25em 0.5em; font-size: 0.85em; font-weight: 600; cursor: pointer; }
+.mqtt-warn:hover { background: #fde68a; }
+.mqtt-warn svg { width: 18px; height: 18px; flex: 0 0 auto; }
 ul, ol { list-style: none; padding: 0; margin: 0; }
 #cameraList li { padding: 0.5em; border: 1px solid #ddd; border-radius: 6px;
   margin-bottom: 0.5em; cursor: pointer; }

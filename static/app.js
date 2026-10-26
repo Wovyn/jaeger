@@ -131,6 +131,20 @@
     }
   }
 
+  function renderMqttWarn(s) {
+    var warn = $("mqttWarn");
+    if (!warn) return;
+    var msg = "";
+    if (s.mqtt_configured === false) msg = "MQTT is not enabled.";
+    else if (!s.mqtt_connected) msg = "MQTT broker not connected.";
+    if (msg) {
+      $("mqttWarnText").textContent = msg;
+      warn.classList.remove("hidden");
+    } else {
+      warn.classList.add("hidden");
+    }
+  }
+
   function loadStatus() {
     return api("/api/status").then(function (s) {
       state.lastStatus = s;
@@ -139,6 +153,7 @@
       var dot = $("statusDot");
       dot.className = "dot " + (s.mqtt_connected ? "online" : "offline");
       dot.title = s.mqtt_connected ? "MQTT connected" : "MQTT disconnected";
+      renderMqttWarn(s);
       renderStatusLine();
     }).catch(function () { /* keep last good state */ });
   }
@@ -1723,7 +1738,8 @@
     });
   }
 
-  function openServiceSettings() {
+  function openServiceSettings(panel) {
+    panel = panel || "storage";
     $("svcError").textContent = "";
     $("mqttTestStatus").textContent = "";
     $("mqttTestStatus").className = "mqtt-status";
@@ -1751,11 +1767,11 @@
       updateMqttToggles();
     });
     Promise.all([statusP, mqttP]).then(function () {
-      switchSvcPanel("storage");
+      switchSvcPanel(panel);
       $("settingsModal").classList.remove("hidden");
     }, function (e) {
       $("svcError").textContent = "Could not load service settings: " + e.message;
-      switchSvcPanel("storage");
+      switchSvcPanel(panel);
       $("settingsModal").classList.remove("hidden");
     });
   }
@@ -2053,6 +2069,9 @@
     $("clearClassFilter").addEventListener("click", clearClassFilter);
     $("refreshEventsBtn").addEventListener("click", function () {
       loadEvents(true);
+    });
+    $("mqttWarn").addEventListener("click", function () {
+      openServiceSettings("mqtt");
     });
     $("modalClose").addEventListener("click", closeModal);
     $("modalPrev").addEventListener("click", function () { modalStep(-1); });

@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - RTSP camera test in the compact modal now maps the actual server test response (width/height/thumbnail_base64); the branch code expected resolution/jpeg_base64, which the server never returns, so the pill showed no resolution and no thumbnail.
 - Events list, event modal caption, and counts header now show the camera name instead of the camera id: `GET /api/events` returns `camera_name` (resolved from the current camera config, falling back to the id for a deleted/unknown camera) for both sidecar-backed and pre-v0.2.0 JPG-only entries, and the web UI prefers it (falling back to its local camera-name lookup).
+- Events panel header now shows an amber warning (triangle icon with "!" plus message) whenever MQTT is not healthy: "MQTT is not enabled." when MQTT is not configured/disabled, "MQTT broker not connected." when configured but disconnected; nothing shows while connected. The warning updates live through `loadStatus` (startup, SSE open, and event/frame/config messages), and clicking it opens Service Settings on the MQTT panel.
 
 
 ## [0.3.0] - 2026-10-16
