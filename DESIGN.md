@@ -406,7 +406,7 @@ Fields are grouped so the modal stays concise. Groups, in order:
 
 - The [+] Add Camera button is enabled and opens the Add modal (15.4).
 - Cameras panel rows show: icon, name, type, status dot (online/degraded/paused/offline), last image-grab time, and per-row pause/resume + edit + delete controls. Pi camera row has no delete control.
-- Inference-falling-behind signal: each row shows its last inference time, and the header or Cameras panel shows a load indicator: saturation = sum over cameras of (measured inference_time / sample_interval). Above 1.0 the worker cannot keep up and the UI warns that inference is saturated (frames are superseded, per-camera effective intervals grow). No hard camera limit; the stats are the limit signal.
+- Inference-falling-behind signal: each row shows its last inference time, and the header or Cameras panel shows a load indicator: saturation = sum over running cameras of (measured inference_time / sample_interval), excluding paused cameras and cameras with no live backend. Above 1.0 the worker cannot keep up and the UI warns that inference is saturated (frames are superseded, per-camera effective intervals grow). No hard camera limit; the stats are the limit signal.
 - Grab timing per camera is shown (last grab duration, and for per-capture mode the connect + keyframe + decode cost) so the user can judge whether per-capture mode works for that camera.
 - No-cameras empty state: when zero cameras are configured, the Cameras panel says so and points at [+].
 - Rescan for Pi camera action when no Pi camera is present.

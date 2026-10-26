@@ -1660,10 +1660,12 @@ class YoloSensor:
         """Inference load: sum over cameras of
         (measured inference_time / sample_interval). Above 1.0 the
         worker cannot keep up; frames are superseded and per-camera
-        effective intervals grow. No hard camera limit; this is the
+        effective intervals grow. Paused cameras and cameras with no live backend are excluded. No hard camera limit; this is the
         limit signal (DESIGN.md §15.7)."""
         total = 0.0
         for cam in self.cameras:
+            if cam.get("paused") or cam.get("obj") is None:
+                continue
             secs = cam.get("last_inference_seconds")
             interval = cam["cfg"].get("sample_interval", 5.0) or 5.0
             if secs:

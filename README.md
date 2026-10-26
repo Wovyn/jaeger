@@ -385,7 +385,7 @@ see DESIGN.md §13 for the no-auth decision).
   Add-camera modal; Rescan retries Pi-camera detection. With zero cameras
   the panel shows an empty state pointing at [+].
 - Inference load indicator: saturation = sum over cameras of (measured
-  inference time / sample interval). Above 1.0 the UI warns that
+  inference time / sample interval, excluding paused cameras and cameras with no live backend). Above 1.0 the UI warns that
   inference is saturated (frames are superseded, per-camera effective
   intervals grow).
 - Right: events list, newest first, last 25 with infinite scroll for
@@ -508,7 +508,7 @@ Inference throughput is the global bottleneck (~4.6 s nano @640px cold,
 ~1 s warmed). N cameras → per-camera effective interval ≈
 max(configured interval, N × inference_time). Two cameras ≈ 2 s effective
 each warmed at 640px nano. The UI's load indicator (saturation = sum of
-inference_time / sample_interval) is the limit signal: above 1.0 the
+inference_time / sample_interval over running cameras only; paused and no-backend cameras are excluded) is the limit signal: above 1.0 the
 worker cannot keep up, frames are superseded, and effective intervals
 grow. Mitigations: lower `imgsz` (416/320), lengthen sample intervals,
 nano-only, or fewer cameras per Pi. RTSP H.264 decode costs ~10–20% of
