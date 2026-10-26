@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Pi Test capture now reports its result (it read the
   /api/cameras response as a list and stopped at "Capturing...").
 
+## [0.4.0] - 2026-10-25
+
+### Added
+- MQTT-optional startup: if `config.json` is missing, a default config is created (mode 0600) with MQTT disabled, zero cameras, yolov8n, and the web UI on 0.0.0.0:8082, instead of exiting. If the `mqtt` block is missing, empty, disabled, or enabled with an empty host, MQTT is treated as not configured: no KeyError, `/api/status` reports `mqtt_configured: false` and `mqtt_connected: false`, and all publishing is a no-op. Cameras, inference, the ring buffer and the web UI run normally.
+- MQTT background connect: an enabled broker that is unreachable or rejects credentials at startup no longer blocks the service. The web UI, cameras and inference loop start immediately and the broker connection runs in a background thread with paho reconnect backoff (1-60s); on (re)connect the service republishes config, status and per-camera baselines exactly as before. LWT applies to the enabled case only.
+- Service settings left-nav (HUD pattern): Storage Limit, Detection Model, and MQTT panels under one Save. The MQTT panel has an Enable MQTT toggle, Host, Port, TLS toggle, Topic root, Username and Password; blank password keeps the stored password. Blank port defaults to 8883 with TLS and 1883 without; blank topic root defaults to Wovyn/RaspberryPi/Jaeger.
+- MQTT connection test: `GET /api/mqtt/settings` returns the broker settings without the password (`has_password` only); `POST /api/mqtt/test` tries a temporary paho client (about 10s timeout, TLS per the toggle, blank password resolves to the stored password) without touching the live client or saving anything. Save tests first when MQTT is enabled and saves nothing on failure. A successful save switches the live client to the new broker (background reconnect on failure) or disconnects it when MQTT is disabled; retained topics under an old topic root are not cleared automatically.
+- USB cameras: `USBCamera` backend (persistent V4L2 capture via OpenCV, FOURCC/width/height/fps from the chosen format) registered in `CAMERA_TYPES`. `GET /api/cameras/usb/scan` is read-only and lists only uvcvideo video-capture nodes with a stable by-id (or by-path) device id, excluding Pi unicam/ISP/codec nodes and metadata-only -video-index1 nodes, with real formats from v4l2-ctl; configured-but-unplugged USB cameras appear as present:false. Add/edit/test dispatch on `type: "usb"`; the test returns the RTSP test shape (thumbnail_base64, width, height, codec=pixel_format, grab_seconds, source=device_id). The Add-camera chooser gains a `CAM_TYPES.usb` entry (Device + Capture tabs, then shared Detection + Watchlist) with format selects from the scan and a persistent-connection note. Unplugged USB cameras go offline without losing their config and resume when the device reappears.
+- UVC controls for USB cameras: auto exposure + exposure_time_absolute (1-10000) and auto white balance + white_balance_temperature (0-10000), stored in a `usb_controls` block separate from Pi `camera_controls`, applied with v4l2-ctl on open and on edit; manual fields are disabled while the matching auto toggle is on. No brightness/contrast/saturation/gain controls in this version.
+- Compact camera modal (from branch `ui/camera-modal-compact`, Oct 25, 2026): one shared modal driven by a `CAM_TYPES` registry, Add-camera chooser with Found on this device / Add manually, fixed-height modal, footer test pill with thumbnail. (This was the branch this version builds on.)
+
+### Fixed
+- RTSP camera test in the compact modal now maps the actual server test response (width/height/thumbnail_base64); the branch code expected resolution/jpeg_base64, which the server never returns, so the pill showed no resolution and no thumbnail.
+
+
 ## [0.3.0] - 2026-10-16
 
 ### Added

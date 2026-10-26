@@ -109,8 +109,26 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
    scrolls, and switching tabs never resizes the modal. */
 .cam-modal-box { max-width: 1000px; width: 96vw; height: min(90vh, 640px); max-height: none;
   display: flex; flex-direction: column; overflow: hidden; padding: 0; border-radius: 12px; }
-.svc-modal-box { max-width: 600px; width: 96vw; max-height: 90vh; overflow-y: auto;
-  padding: 0; border-radius: 12px; }
+.svc-modal-box { max-width: 720px; width: 96vw; max-height: 90vh; overflow-y: auto; padding: 0; border-radius: 12px; }
+.svc-layout { display: flex; gap: 0; background: #F7F8FA; }
+.svc-nav { flex: 0 0 150px; display: flex; flex-direction: column; gap: 4px; padding: 20px 12px; border-right: 1px solid #E3E6EA; }
+.svc-nav-item { text-align: left; padding: 9px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #3B4048; font-size: 13px; cursor: pointer; }
+.svc-nav-item:hover { background: #fff; border-color: #E3E6EA; }
+.svc-nav-item.active { background: #fff; border-color: #C9CED4; color: #1D2228; font-weight: 600; }
+.svc-panels { flex: 1; min-width: 0; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+.svc-panel { display: flex; flex-direction: column; gap: 16px; }
+.svc-card input[type="text"], .svc-card input[type="password"] { height: 36px; border: 1px solid #C9CED4; border-radius: 6px; padding: 0 8px; width: 100%; box-sizing: border-box; }
+.svc-card input:disabled { opacity: 0.5; }
+.svc-test-row { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
+.svc-test-row button { height: 34px; border: 1px solid #C9CED4; border-radius: 6px; background: #fff; padding: 0 12px; cursor: pointer; }
+.svc-test-row button:disabled { opacity: 0.5; cursor: default; }
+.mqtt-status { font-size: 13px; }
+.mqtt-status.ok { color: #1E7A34; }
+.mqtt-status.fail { color: #B42318; }
+@media (max-width: 600px) {
+  .svc-layout { flex-direction: column; }
+  .svc-nav { flex: none; flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid #E3E6EA; padding: 12px; }
+}
 .cam-modal-box form, .svc-modal-box form { background: #F7F8FA; }
 .cam-modal-box form { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .cam-body { flex: 1; min-height: 0; overflow-y: auto; background: #F7F8FA; }
@@ -258,7 +276,7 @@ ul, ol { list-style: none; padding: 0; margin: 0; }
 .svc-body { padding: 20px 24px; background: #F7F8FA; display: flex; flex-direction: column; gap: 16px; }
 .svc-card { background: #fff; border: 1px solid #E3E6EA; border-radius: 10px; padding: 14px 16px 16px; }
 .svc-card label { display: block; font-size: 13px; font-weight: 500; color: #3B4048; margin-bottom: 6px; }
-.svc-card select, .svc-card input[type="number"] { height: 36px; border: 1px solid #C9CED4; border-radius: 6px;
+.svc-card select, .svc-card input[type="number"], .svc-card input[type="text"], .svc-card input[type="password"] { height: 36px; border: 1px solid #C9CED4; border-radius: 6px;
   padding: 0 10px; font-size: 14px; color: #1D2228; background: #fff; box-sizing: border-box; }
 .svc-card select { width: 100%; }
 .svc-card .hint { font-size: 12px; color: #6B737D; line-height: 1.4; margin: 8px 0 0; }

@@ -1,4 +1,4 @@
-"""Jaeger web UI (v0.3.0): embedded HTTP server for Jaeger.
+"""Jaeger web UI (v0.4.0): embedded HTTP server for Jaeger.
 
 Serves the static UI plus a small JSON API backed by the live YoloSensor
 object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).
@@ -196,6 +196,10 @@ class JaegerWebServer:
                         self._api_latest_meta(params)
                     elif path == "/api/stream":
                         self._api_stream()
+                    elif path == "/api/mqtt/settings":
+                        self._api_mqtt_settings_get()
+                    elif path == "/api/cameras/usb/scan":
+                        self._api_usb_scan()
                     elif path == "/api/config":
                         self._api_config_get(params)
                     elif path == "/api/classes":
@@ -213,7 +217,9 @@ class JaegerWebServer:
             def do_POST(self):
                 parsed = urlparse(self.path)
                 try:
-                    if parsed.path == "/api/config":
+                    if parsed.path == "/api/mqtt/test":
+                        self._api_mqtt_test()
+                    elif parsed.path == "/api/config":
                         self._api_config_post()
                     elif parsed.path == "/api/capture_now":
                         self._api_capture_now()
@@ -306,6 +312,7 @@ class JaegerWebServer:
                     "model": getattr(s, "model_name", None),
                     "saturation": s.saturation(),
                     "mqtt_connected": bool(s.mqtt_connected),
+                    "mqtt_configured": bool(getattr(s, "mqtt_configured", False)),
                     "uptime_seconds": uptime,
                     "started_at": s.started_at,
                     "last_cycle_seconds": s.last_cycle_seconds,
@@ -594,7 +601,7 @@ class JaegerWebServer:
                 for k, v in body.items():
                     if k == "camera_id":
                         continue
-                    if k in ("model", "buffer_cap_mb"):
+                    if k in ("model", "buffer_cap_mb", "mqtt"):
                         service_keys[k] = v
                     else:
                         cam_cmd[k] = v
@@ -703,6 +710,27 @@ class JaegerWebServer:
                     self._send_error_json(400, result.get("error", "failed"))
                     return
                 self._send_json({"ok": True})
+
+            def _api_mqtt_settings_get(self):
+                self._send_json(sensor_ref.mqtt_settings())
+
+            def _api_mqtt_test(self):
+                body = self._read_json_body()
+                if body is None:
+                    self._send_error_json(400, "need JSON mqtt settings")
+                    return
+                try:
+                    result = sensor_ref.mqtt_test(body)
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                except Exception:
+                    self._send_error_json(500, "mqtt test failed")
+                    return
+                self._send_json(result)
+
+            def _api_usb_scan(self):
+                self._send_json(sensor_ref.usb_scan())
 
             def _api_cameras_rescan(self):
                 result, ok = sensor_ref.enqueue_web("rescan", None, {},

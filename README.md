@@ -19,7 +19,7 @@ camera lifecycle APIs, Jaeger MQTT tree. A v0.3.0 follow-up committed Oct 23,
 2026 (version unchanged) added the tabbed camera modals and slimmed Service
 settings, asymmetric debounce + weak detections, the event-image Download
 button, and the Detection-tab / About-dialog fixes (including the Wovyn logo).
-Repository renamed to Wovyn/jaeger Oct 24, 2026 (local folder ~/projects/jaeger). The production service runs v0.3.0. See DESIGN.md section 15 for the design.
+Repository renamed to Wovyn/jaeger Oct 24, 2026 (local folder ~/projects/jaeger). v0.4.0 built Oct 25, 2026: MQTT-optional startup with a default config, Service settings left-nav (Storage Limit, Detection Model, MQTT) with a connection test, and USB cameras (scan/add/edit, persistent V4L2 capture, UVC exposure/white-balance controls). The production service runs v0.4.0. See DESIGN.md section 16 for the design.
 
 ## Hardware
 
@@ -185,14 +185,14 @@ cd ~/projects/jaeger
 
 `config.json` layout: `model` (service-level, `yolov8n`/`yolov8s`),
 `next_camera_id` (monotonic counter, never reused after a delete),
-`mqtt` (host/port/username/password/tls/topic_root),
-`cameras` (list; each entry — id, name, type [`picamera`|`rtsp`], icon,
+`mqtt` (enabled/host/port/username/password/tls/topic_root; enabled=false or an empty host means MQTT is not configured and the service runs without MQTT reporting),
+`cameras` (list; each entry — id, name, type [`picamera`|`rtsp`|`usb`], icon,
 paused, rotate, resolution, sample_interval, imgsz, confidence_threshold,
 watchlist, publish toggles, heartbeat_interval,
 disappear_confirm_cycles, camera_controls, and for
 RTSP cameras an `rtsp` block: scheme/host/port/path/stream/transport/
 connection_mode/timeout_s/snapshot_url/tls_allow_self_signed/username/
-password), `buffer` (dir, cap_bytes, max_files, jpeg_quality),
+password), and for USB cameras a `usb` block (device_id/model/pixel_format/fps) plus `usb_controls` (auto_exposure/exposure_time_absolute/white_balance_automatic/white_balance_temperature), `buffer` (dir, cap_bytes, max_files, jpeg_quality),
 `web` (enabled, host, port — default 0.0.0.0:8082).
 See `config.json.example` for the full schema. The RTSP URL is built
 server-side from the `rtsp` parts at connect time and never stored as a
@@ -360,7 +360,7 @@ jaeger/
 | RTSP camera stuck `degraded` | capture thread is failing/retrying with backoff; check the log for the (redacted) failure reason |
 | Inference load above 1.0 | the worker cannot keep up — lengthen sample intervals, lower `imgsz`, use yolov8n, or drop a camera (see §12) |
 
-## 10. Web UI (Jaeger, v0.3.0)
+## 10. Web UI (Jaeger, v0.4.0)
 
 Open `http://<pi-ip>:8082` in a browser (no login — LAN-only by design;
 see DESIGN.md §13 for the no-auth decision).
@@ -414,18 +414,13 @@ see DESIGN.md §13 for the no-auth decision).
   sample image (thumbnail + resolution + codec) without persisting
   anything; saving connection changes re-runs the test before persisting.
   On edit, leaving the password blank keeps the stored password.
-- Service settings (hamburger menu) is system-wide only: the shared
-  YOLO model (yolov8n / yolov8s) and the image-history (ring buffer)
-  limit, with a live In-use bar. Per-camera detection settings live in
-  each camera modal Detection tab, and Pi camera controls in its
-  Camera tab. UI config writes go through the same apply + persist
-  path as MQTT `config/set`.
+- Service settings (hamburger menu) is system-wide only, with a left nav: Storage Limit (image-history ring-buffer limit, with a live In-use bar), Detection Model (shared YOLO model yolov8n / yolov8s), and MQTT (Enable toggle, host, port, TLS, topic root, username, password; blank password keeps the stored password). One Save applies all panels. When MQTT is enabled, Save tests the connection first; a failed test saves nothing. Changing broker or topic root switches the live client (background reconnect on failure); retained topics under an old topic root are not cleared automatically. Per-camera detection settings live in each camera modal Detection tab, and Pi camera controls in its Camera tab. UI config writes go through the same apply + persist path as MQTT `config/set`.
 
 API (same server, JSON unless noted):
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/status` | version, service model, inference saturation, MQTT state, uptime, last inference, buffer usage |
+| `GET /api/status` | version, service model, inference saturation, MQTT state (mqtt_configured + mqtt_connected), uptime, last inference, buffer usage |
 | `GET /api/cameras` | per-camera config + buffer stats (never includes RTSP passwords) |
 | `GET /api/counts?camera=` | current counts for a camera |
 | `GET /api/classes?camera=` | COCO class names + watchlist |
@@ -434,7 +429,10 @@ API (same server, JSON unless noted):
 | `GET /api/latest?camera=` | latest frame as base64 JPEG + counts |
 | `GET /api/latest_meta?camera=` | latest detections + weak (sub-threshold) detections with confidences |
 | `GET /api/config?camera=` | camera config (passwords stripped) |
-| `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set`; `model` + `buffer_cap_mb` are service-level |
+| `POST /api/config` | `{camera_id, ...keys}` — same keys as MQTT `config/set`; `model` + `buffer_cap_mb` + `mqtt` block are service-level |
+| `GET /api/mqtt/settings` | MQTT settings without the password (`enabled, host, port, tls, topic_root, username, has_password`) |
+| `POST /api/mqtt/test` | test a broker config without saving (blank password resolves to the stored password) |
+| `GET /api/cameras/usb/scan` | USB cameras found on this Pi (uvcvideo capture nodes only, stable by-id, formats) plus configured-but-unplugged USB cameras |
 | `POST /api/capture_now` | `{camera_id}` — trigger an immediate cycle |
 | `POST /api/cameras/test` | connection test: `{...camera form, camera_id?}` → `{thumbnail_base64, width, height, codec, grab_seconds, source}`; persists nothing |
 | `POST /api/cameras` | add a camera (tests the connection before persisting) |
@@ -444,6 +442,8 @@ API (same server, JSON unless noted):
 | `DELETE /api/cameras/<id>` | delete (clears retained MQTT topics, keeps buffered images) |
 | `POST /api/cameras/rescan` | retry Pi-camera detection at runtime |
 | `GET /api/stream` | server-sent events: event/frame/config pushes |
+
+USB cameras are added from the Add-camera chooser (Found on this device), which scans uvcvideo capture nodes and reports each device's real formats. A USB camera stores a stable by-id device id (never /dev/videoN), a chosen pixel format (MJPG preferred), resolution and frame rate, and optional UVC controls: auto exposure + exposure_time_absolute (1-10000) and auto white balance + white_balance_temperature (0-10000). Controls are applied with v4l2-ctl on open and on edit. Unplugging a USB camera marks it offline; its config is kept and capture resumes when it reappears.
 
 ## 11. Camera controls (Picamera2)
 
