@@ -380,6 +380,8 @@ class JaegerWebServer:
 
             def _api_events(self, params):
                 s = sensor_ref
+                id_to_name = {c["id"]: c["cfg"].get("name", c["id"])
+                              for c in s.cameras}
                 cam_id = params.get("camera", [None])[0]
                 class_filter = params.get("class", [None])[0]
                 before = params.get("before", [None])[0]
@@ -420,6 +422,9 @@ class JaegerWebServer:
                         entry = {
                             "event_id": data.get("event_id", stem),
                             "camera_id": data.get("camera_id", cid),
+                            "camera_name": id_to_name.get(
+                                data.get("camera_id", cid),
+                                data.get("camera_id", cid)),
                             "timestamp": data.get("timestamp")
                             or _ts_from_filename(stem),
                             "counts": data.get("counts", {}),
@@ -436,6 +441,7 @@ class JaegerWebServer:
                         entries.append({
                             "event_id": stem,
                             "camera_id": cid,
+                            "camera_name": id_to_name.get(cid, cid),
                             "timestamp": _ts_from_filename(stem),
                             "counts": {},
                             "detections": {},

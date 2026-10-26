@@ -257,7 +257,7 @@
     if (!state.selectedCamera) return Promise.resolve();
     return api("/api/counts?camera=" + encodeURIComponent(state.selectedCamera))
       .then(function (r) {
-        $("countsCamera").textContent = "— " + r.camera_id;
+        $("countsCamera").textContent = "— " + cameraName(r.camera_id);
         var list = $("countsList");
         list.innerHTML = "";
         var shown = 0;
@@ -353,7 +353,7 @@
     var timeHtml = "<span class=\"event-time\" title=\"" + fmtUTC(e.timestamp) +
       "\">" + fmtLocal(e.timestamp) + "</span>";
     li.innerHTML =
-      "<div class=\"event-info\"><b>" + escHtml(e.camera_id) + "</b> " + timeHtml +
+      "<div class=\"event-info\"><b>" + escHtml(e.camera_name || cameraName(e.camera_id)) + "</b> " + timeHtml +
       "<div class=\"event-objs\">" + escHtml(countsSummary(e.counts)) + "</div>" +
       (e.has_metadata ? "" : "<div class=\"event-objs\">no metadata</div>") +
       "</div>" +
@@ -443,7 +443,7 @@
     img.src = e.image_url;
     $("modalSvg").style.display = $("bboxToggle").checked ? "" : "none";
     $("modalCaption").textContent =
-      e.camera_id + " · " + fmtLocal(e.timestamp) + " · " + countsSummary(e.counts);
+      (e.camera_name || cameraName(e.camera_id)) + " · " + fmtLocal(e.timestamp) + " · " + countsSummary(e.counts);
     $("modal").classList.remove("hidden");
   }
   function closeModal() {

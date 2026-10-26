@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Service settings modal widened from 720px to 980px (96vw, matching the camera modal's scale) and re-laid as a fixed-height flex column (min(90vh, 640px), pinned footer) so no panel scrolls at 1366x768; the MQTT panel is now two side-by-side cards (Connection: Host, Port + TLS, Topic root; Credentials: Username, Password, Test connection + status, shortened save-tests-first tip) under the full-width Enable MQTT card. Small viewports (max-width 600px) keep stacked nav and scrolling as the documented fallback. Panel heights were verified by content-height measurement, not by eye; the pixel check in a real browser is still Scott's.
 ### Fixed
 - RTSP camera test in the compact modal now maps the actual server test response (width/height/thumbnail_base64); the branch code expected resolution/jpeg_base64, which the server never returns, so the pill showed no resolution and no thumbnail.
+- Events list, event modal caption, and counts header now show the camera name instead of the camera id: `GET /api/events` returns `camera_name` (resolved from the current camera config, falling back to the id for a deleted/unknown camera) for both sidecar-backed and pre-v0.2.0 JPG-only entries, and the web UI prefers it (falling back to its local camera-name lookup).
 
 
 ## [0.3.0] - 2026-10-16
