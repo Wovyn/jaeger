@@ -355,6 +355,7 @@
           <button type="button" class="svc-nav-item active" data-svc-panel="storage">Storage Limit</button>
           <button type="button" class="svc-nav-item" data-svc-panel="model">Detection Model</button>
           <button type="button" class="svc-nav-item" data-svc-panel="mqtt">MQTT</button>
+          <button type="button" class="svc-nav-item" data-svc-panel="general">General</button>
         </nav>
         <div class="svc-panels">
           <section id="svcPanelStorage" class="svc-panel">
@@ -383,26 +384,46 @@
               <p class="hint">When off, the service runs without MQTT reporting. Cameras, detection, images and the web UI keep working.</p>
             </div>
             <div class="svc-card">
+              <div class="svc-two-col">
+                <div class="svc-subcard">
+                  <p class="svc-subhead">Connection</p>
+                  <label>Host
+                    <input type="text" id="mqttHost" placeholder="broker.example.com" autocomplete="off"></label>
+                  <div class="form-row">
+                    <label class="fld-port">Port
+                      <input type="number" id="mqttPort" min="1" max="65535"></label>
+                    <label class="fld-inline fld-check"><input type="checkbox" id="mqttTls" checked> Use TLS</label>
+                  </div>
+                  <label>Topic root
+                    <input type="text" id="mqttTopicRoot" placeholder="Wovyn/RaspberryPi/Jaeger" autocomplete="off"></label>
+                </div>
+                <div class="svc-subcard">
+                  <p class="svc-subhead">Credentials</p>
+                  <label>Username
+                    <input type="text" id="mqttUsername" autocomplete="off"></label>
+                  <label>Password <span class="tip" tabindex="0" data-tip="When editing, leave blank to keep the stored password. It is never shown back.">i</span>
+                    <input type="password" id="mqttPassword" autocomplete="off"></label>
+                  <div class="svc-test-row">
+                    <button type="button" id="mqttTestBtn">Test connection</button>
+                    <span id="mqttTestStatus" class="mqtt-status"></span>
+                  </div>
+                  <p class="hint">Tip: Save tests first when MQTT is enabled; a failed test saves nothing. Retained topics under an old topic root are not cleared automatically.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section id="svcPanelGeneral" class="svc-panel hidden">
+            <div class="svc-card">
               <div class="form-row">
-                <label>Host
-                  <input type="text" id="mqttHost" placeholder="broker.example.com" autocomplete="off"></label>
                 <label class="fld-port">Port
-                  <input type="number" id="mqttPort" min="1" max="65535"></label>
+                  <input type="number" id="svcWebPort" min="1024" max="65535"></label>
               </div>
-              <label class="fld-inline"><input type="checkbox" id="mqttTls" checked> Use TLS</label>
-              <label>Topic root
-                <input type="text" id="mqttTopicRoot" placeholder="Wovyn/RaspberryPi/Jaeger" autocomplete="off"></label>
-              <div class="form-row">
-                <label>Username
-                  <input type="text" id="mqttUsername" autocomplete="off"></label>
-                <label>Password <span class="tip" tabindex="0" data-tip="When editing, leave blank to keep the stored password. It is never shown back.">i</span>
-                  <input type="password" id="mqttPassword" autocomplete="off"></label>
-              </div>
+              <p class="svc-url-line">Current portal: <span id="svcWebUrl" class="mono">—</span></p>
               <div class="svc-test-row">
-                <button type="button" id="mqttTestBtn">Test connection</button>
-                <span id="mqttTestStatus" class="mqtt-status"></span>
+                <button type="button" id="webTestBtn">Check availability</button>
+                <span id="webTestStatus" class="mqtt-status"></span>
               </div>
-              <p class="hint">Test checks the entered broker without saving. Save also tests first when MQTT is enabled; if the test fails, nothing is saved. Retained topics under an old topic root are not cleared automatically.</p>
+              <p class="hint">Saving a different port restarts the service on the new port and open browsers are moved automatically. A bookmark to the old port will not follow — update it after the move. Tabs that are closed cannot be moved.</p>
             </div>
           </section>
         </div>

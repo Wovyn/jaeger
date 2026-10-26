@@ -197,6 +197,46 @@ def test_mqtt_connection(fields, stored=None, timeout=10.0):
 # Helpers
 # --------------------------------------------------------------------------
 
+# ---- portal (web UI) port helpers (v0.4.0 General panel) ----
+WEB_PORT_MIN = 1024
+WEB_PORT_MAX = 65535
+DEFAULT_WEB_HOST = "0.0.0.0"
+DEFAULT_WEB_PORT = 8082
+
+
+def validate_web_port(value):
+    """Portal port: integer 1024-65535. musecell cannot bind <1024."""
+    if isinstance(value, bool):
+        raise ValueError("portal port must be an integer 1024-65535")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("portal port must be an integer 1024-65535")
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("portal port must be an integer 1024-65535")
+    if not WEB_PORT_MIN <= port <= WEB_PORT_MAX:
+        raise ValueError("portal port must be 1024-65535")
+    return port
+
+
+def web_port_available(host, port):
+    """Authoritative bind test on the configured host: bind, close at
+    once. True when nothing is listening there right now."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Mirror the real server (allow_reuse_address): a port in TIME_WAIT
+    # after a just-closed listener must NOT read as "in use" (moving
+    # straight back to the previous port failed on this, Oct 26),
+    # while an actively listening socket still blocks the bind.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
 def utcnow_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1318,6 +1358,8 @@ class YoloSensor:
         self.last_cycle_at = None
         self.web_server = None
         self.web_port = None
+        self.restart_requested = None
+        self.restart_exec = False
         self.config_path = CONFIG_PATH
         # Shared model (service-level, owned by the inference worker).
         self.model_name = config.get("model", "yolov8n")
@@ -1663,13 +1705,64 @@ class YoloSensor:
         self.notify_stream({"type": "config"})
         print(f"model swap complete: {want}", flush=True)
 
+    def current_web_host(self):
+        web_cfg = self.config.get("web") \
+            if isinstance(self.config.get("web"), dict) else {}
+        return str(web_cfg.get("host") or DEFAULT_WEB_HOST)
+
+    def current_web_port(self):
+        if self.web_port:
+            try:
+                return int(self.web_port)
+            except (TypeError, ValueError):
+                pass
+        web_cfg = self.config.get("web") \
+            if isinstance(self.config.get("web"), dict) else {}
+        try:
+            return int(web_cfg.get("port", DEFAULT_WEB_PORT))
+        except (TypeError, ValueError):
+            return DEFAULT_WEB_PORT
+
+    def test_web_port(self, port):
+        """POST /api/web/test-port logic. The port this process is
+        already serving on always tests available: it is freed when
+        the service restarts onto it."""
+        port = validate_web_port(port)
+        if port == self.current_web_port():
+            return {"ok": True, "port": port, "available": True,
+                    "current": True}
+        host = self.current_web_host()
+        if web_port_available(host, port):
+            return {"ok": True, "port": port, "available": True,
+                    "current": False}
+        return {"ok": False, "port": port, "available": False,
+                "current": False,
+                "error": f"port {port} is not available on {host}"}
+
     def apply_service_config(self, cmd):
-        # Service-level config: model, buffer cap, and/or mqtt block.
-        # One save for a combined call; MQTT switching happens after
-        # the save. Retained topics under an old topic_root are NOT
-        # cleared automatically (documented in README/DESIGN).
+        # Service-level config: model, buffer cap, mqtt block, and/or
+        # portal port. One save for a combined call; MQTT switching
+        # happens after the save. Retained topics under an old
+        # topic_root are NOT cleared automatically (documented in
+        # README/DESIGN).
+        # Returns a dict: empty normally, or restarting/new_port/
+        # old_port when a port change schedules a service restart.
+        # A bad port raises ValueError BEFORE any mutation, so a
+        # failed port save persists nothing.
         if not isinstance(cmd, dict):
-            return
+            return {}
+        restart_info = None
+        if 'web_port' in cmd:
+            new_port = validate_web_port(cmd['web_port'])
+            old_port = self.current_web_port()
+            if new_port != old_port:
+                host = self.current_web_host()
+                if not web_port_available(host, new_port):
+                    raise ValueError(
+                        f"portal port {new_port} is not available "
+                        f"on {host}")
+                restart_info = {'old_port': old_port,
+                                'new_port': new_port}
         changed = False
         mqtt_switch = None
         if 'model' in cmd:
@@ -1691,8 +1784,30 @@ class YoloSensor:
                 self.root = str(new_mqtt.get('topic_root') or DEFAULT_TOPIC_ROOT).rstrip('/')
                 mqtt_switch = new_mqtt
                 changed = True
+        if 'web_port' in cmd:
+            # Legacy configs may have no web block: create it with
+            # defaults (host 0.0.0.0, current port) rather than crash.
+            web_cfg = self.config.setdefault('web', {})
+            if not isinstance(web_cfg, dict):
+                web_cfg = self.config['web'] = {}
+            before = dict(web_cfg)
+            web_cfg.setdefault('host', DEFAULT_WEB_HOST)
+            if restart_info is not None:
+                web_cfg['port'] = restart_info['new_port']
+                changed = True
+            else:
+                web_cfg.setdefault('port', old_port)
+            if web_cfg != before:
+                changed = True
         if changed:
             self.save_config()
+            if restart_info is not None:
+                # Restart AFTER the save response reaches the browser:
+                # the main loop honours this once the delay elapses.
+                self.restart_requested = {
+                    'old_port': restart_info['old_port'],
+                    'new_port': restart_info['new_port'],
+                    'at': time.monotonic() + 0.75}
             if mqtt_switch is not None:
                 if self.mqtt_configured:
                     self.mqtt_disconnect()
@@ -1703,6 +1818,11 @@ class YoloSensor:
             else:
                 self.publish_service_config()
                 self.notify_stream({'type': 'config'})
+        if restart_info is not None:
+            return {'restarting': True,
+                    'old_port': restart_info['old_port'],
+                    'new_port': restart_info['new_port']}
+        return {}
 
 
     # ---- incoming commands ----
@@ -1756,7 +1876,8 @@ class YoloSensor:
                     cam["priority_next"] = True
                     result["ok"] = True
             elif kind == "service_config":
-                self.apply_service_config(cmd)
+                info = self.apply_service_config(cmd) or {}
+                result.update(info)
                 result["ok"] = True
             elif kind == "camera_add":
                 result["camera"] = self.add_camera(cmd)
@@ -2924,6 +3045,37 @@ class YoloSensor:
               flush=True)
         while not self.stop_flag:
             self.drain_messages()
+            if self.restart_requested is not None and \
+                    time.monotonic() >= self.restart_requested["at"]:
+                req = self.restart_requested
+                self.restart_requested = None
+                host = self.current_web_host()
+                if not web_port_available(host, req["new_port"]):
+                    # Port grabbed since the save: abort, revert the
+                    # saved port, stay on the old port. Clients poll
+                    # the new port, then fall back to the old one.
+                    web_cfg = self.config.setdefault("web", {})
+                    if not isinstance(web_cfg, dict):
+                        web_cfg = self.config["web"] = {}
+                    web_cfg["port"] = req["old_port"]
+                    self.save_config()
+                    print(f"portal-port restart aborted: port "
+                          f"{req['new_port']} became unavailable; "
+                          f"kept port {req['old_port']}", flush=True)
+                    self.notify_stream({"type": "restart_aborted",
+                                        "old_port": req["old_port"],
+                                        "new_port": req["new_port"]})
+                else:
+                    # Every open tab moves: broadcast first, give SSE
+                    # a beat to flush, then exit the loop so
+                    # shutdown() runs before the exec in main().
+                    self.notify_stream({"type": "restart",
+                                        "new_port": req["new_port"]})
+                    time.sleep(0.5)
+                    self.restart_exec = True
+                    self.stop_flag = True
+                    self._stop_evt.set()
+                    break
             self.watchdog_step()
             now = time.time()
             for cam in list(self.cameras):
@@ -2959,7 +3111,25 @@ def load_or_create_config():
 
 
 def main():
-    YoloSensor(load_or_create_config()).run()
+    sensor = YoloSensor(load_or_create_config())
+    sensor.run()
+    if getattr(sensor, "restart_exec", False):
+        # Full-service restart on the new portal port: exec a fresh
+        # process so the whole saved config is re-read (detection and
+        # MQTT behaviour on restart are identical to a manual one:
+        # MQTT offline then online, cameras reopened). Never restart
+        # only the web thread as a shortcut.
+        print("restarting on the new portal port (full service "
+              "restart; config re-read)", flush=True)
+        try:
+            os.execv(sys.executable,
+                     [sys.executable, os.path.abspath(__file__)])
+        except Exception as e:
+            print(f"portal-port restart exec failed ({e}); service "
+                  f"stopped - restart manually from "
+                  f"~/projects/jaeger with: "
+                  f"venv/bin/python -u yolo_sensor.py", flush=True)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

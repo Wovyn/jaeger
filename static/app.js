@@ -15,6 +15,9 @@
     startedAt: null,
     eventsStale: false,
     stream: null,
+    portMoving: false,
+    portMoveAborted: false,
+    svcWebPort: 8082,
     modalIndex: -1,
     editingCameraId: null, // null = add mode
     cameraIcon: "camera",
@@ -1714,7 +1717,7 @@
     document.querySelectorAll(".svc-nav-item").forEach(function (b) {
       b.classList.toggle("active", b.dataset.svcPanel === name);
     });
-    ["storage", "model", "mqtt"].forEach(function (k) {
+    ["storage", "model", "mqtt", "general"].forEach(function (k) {
       var el = $("svcPanel" + k.charAt(0).toUpperCase() + k.slice(1));
       if (el) el.classList.toggle("hidden", k !== name);
     });
@@ -1724,8 +1727,13 @@
     $("svcError").textContent = "";
     $("mqttTestStatus").textContent = "";
     $("mqttTestStatus").className = "mqtt-status";
+    $("webTestStatus").textContent = "";
+    $("webTestStatus").className = "mqtt-status";
     var statusP = api("/api/status").then(function (s) {
       $("svcModel").value = s.model || "yolov8n";
+      state.svcWebPort = s.web_port || 8082;
+      $("svcWebPort").value = state.svcWebPort;
+      $("svcWebUrl").textContent = portalBase(state.svcWebPort) + "/";
       var capMb = Math.round((s.buffer.cap_bytes || 1073741824) / 1048576);
       $("svcBufferCap").value = capMb;
       state.svcBufferBytes = s.buffer.bytes || 0;
@@ -1784,6 +1792,116 @@
     });
   }
 
+  // ---- Portal port move (General panel) ----
+  // A port save restarts the whole service, so every open tab must
+  // move to the new port. Cross-port polling works because
+  // /api/status sends Access-Control-Allow-Origin: * (LAN-only UI).
+  function portalBase(port) {
+    return window.location.protocol + "//" + window.location.hostname + ":" + port;
+  }
+
+  function showPortMoveNotice(html) {
+    var el = $("portMoveNotice");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "portMoveNotice";
+      el.className = "port-move-notice";
+      document.body.appendChild(el);
+    }
+    el.innerHTML = html;
+  }
+
+  function hidePortMoveNotice() {
+    var el = $("portMoveNotice");
+    if (el) el.remove();
+  }
+
+  function waitForPort(port, seconds) {
+    var url = portalBase(port) + "/api/status";
+    var deadline = Date.now() + seconds * 1000;
+    function attempt() {
+      return fetch(url, { cache: "no-store" }).then(function (r) {
+        if (!r.ok) return false;
+        return r.json().then(function (j) {
+          return j.service === "jaeger";
+        }, function () { return false; });
+      }, function () { return false; }).then(function (ok) {
+        if (ok) return true;
+        if (state.portMoveAborted) return false;
+        if (Date.now() >= deadline) return false;
+        return new Promise(function (res) { setTimeout(res, 500); }).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
+  function moveToPort(newPort, oldPort) {
+    if (state.portMoving) return;
+    state.portMoving = true;
+    state.portMoveAborted = false;
+    showPortMoveNotice("Jaeger is restarting on port " + newPort + "…");
+    waitForPort(newPort, 15).then(function (ok) {
+      if (ok) {
+        window.location.href = portalBase(newPort) + "/";
+        return;
+      }
+      if (state.portMoveAborted) {
+        showPortMoveNotice("Port became unavailable; kept the old port.");
+        state.portMoving = false;
+        setTimeout(function () {
+          window.location.href = portalBase(oldPort) + "/";
+        }, 1500);
+        return;
+      }
+      return waitForPort(oldPort, 5).then(function (oldOk) {
+        if (oldOk) {
+          showPortMoveNotice("Port became unavailable; kept the old port.");
+          state.portMoving = false;
+          setTimeout(function () {
+            window.location.href = portalBase(oldPort) + "/";
+          }, 1500);
+        } else {
+          state.portMoving = false;
+          showPortMoveNotice("The service did not come back — check the Pi log and restart manually: " + '<a href="' + portalBase(newPort) + '/">new port ' + newPort + '</a> or ' + '<a href="' + portalBase(oldPort) + '/">old port ' + oldPort + '</a>.')
+        }
+      });
+    });
+  }
+
+  function testWebPort() {
+    var portVal = $("svcWebPort").value;
+    var port = parseInt(portVal, 10);
+    if (!(port >= 1024 && port <= 65535) || String(port) !== String(portVal).trim()) {
+      $("webTestStatus").textContent = "Port must be 1024–65535.";
+      $("webTestStatus").className = "mqtt-status fail";
+      return Promise.resolve(false);
+    }
+    $("webTestBtn").disabled = true;
+    $("webTestStatus").textContent = "Checking…";
+    $("webTestStatus").className = "mqtt-status";
+    return api("/api/web/test-port", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: port }),
+    }).then(function (r) {
+      if (r.ok) {
+        $("webTestStatus").textContent = r.current ? "This is the current port." : "Port available.";
+        $("webTestStatus").className = "mqtt-status ok";
+        return true;
+      }
+      $("webTestStatus").textContent = r.error || "Port unavailable.";
+      $("webTestStatus").className = "mqtt-status fail";
+      return false;
+    }, function (e) {
+      $("webTestStatus").textContent = "Check failed: " + e.message;
+      $("webTestStatus").className = "mqtt-status fail";
+      return false;
+    }).then(function (ok) {
+      $("webTestBtn").disabled = false;
+      return ok;
+    });
+  }
+
   function testMqttSettings() {
     var fields = mqttPanelFields();
     if (!fields.enabled) return Promise.resolve(true);
@@ -1820,6 +1938,13 @@
       $("svcError").textContent = "Image history limit must be at least 1 MB.";
       return;
     }
+    var webPortVal = $("svcWebPort").value;
+    var webPort = parseInt(webPortVal, 10);
+    if (!(webPort >= 1024 && webPort <= 65535) || String(webPort) !== String(webPortVal).trim()) {
+      $("svcError").textContent = "Portal port must be 1024–65535.";
+      switchSvcPanel("general");
+      return;
+    }
     var mqtt = mqttPanelFields();
     if (mqtt.enabled) {
       if (!mqtt.host) {
@@ -1839,7 +1964,7 @@
       return api("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ camera_id: "service", model: model, buffer_cap_mb: cap, mqtt: mqtt }),
+        body: JSON.stringify({ camera_id: "service", model: model, buffer_cap_mb: cap, mqtt: mqtt, web_port: webPort }),
       });
     };
     var afterTest = mqtt.enabled ? testMqttSettings() : Promise.resolve(true);
@@ -1853,6 +1978,13 @@
     }).then(function (r) {
       if (r === null) return;
       $("settingsModal").classList.add("hidden");
+      if (r.restarting) {
+        // Save response arrived before the restart: poll the new
+        // port (backup for the SSE restart broadcast, in case this
+        // tab's SSE stream is already closed).
+        moveToPort(r.new_port, state.svcWebPort || r.old_port);
+        return;
+      }
       loadStatus().then(updateDetModelNote);
       loadCameras();
     }).catch(function (e) {
@@ -1899,6 +2031,7 @@
       if ($("mqttPort").value === "") $("mqttPort").value = $("mqttTls").checked ? 8883 : 1883;
     });
     $("mqttTestBtn").addEventListener("click", testMqttSettings);
+    $("webTestBtn").addEventListener("click", testWebPort);
     $("svcBufferCap").addEventListener("input", updateSvcInUse);
     $("zeroToggle").addEventListener("change", loadCounts);
     $("hideEmptyToggle").addEventListener("change", function () {
@@ -2041,6 +2174,12 @@
         loadLatest();
         loadCameras();
         loadStatus(); // keep header (last inference, load) live
+      } else if (msg.type === "restart") {
+        // Another tab saved a new portal port: move this tab too.
+        // Closed tabs and bookmarks cannot be moved.
+        moveToPort(msg.new_port, parseInt(window.location.port, 10) || 8082);
+      } else if (msg.type === "restart_aborted") {
+        if (state.portMoving) state.portMoveAborted = true;
       } else if (msg.type === "config") {
         loadCameras();
         loadCounts();
