@@ -27,11 +27,10 @@
       <div id="loadIndicator" class="load-indicator" title="Inference load = sum over cameras of (measured inference time / sample interval). Above 1.0 the inference worker cannot keep up; frames are superseded and per-camera effective intervals grow.">Inference load: —</div>
       <ul id="cameraList"></ul>
       <div id="noCamerasEmpty" class="empty-state hidden">
-        No cameras configured. Use [+] to add an RTSP camera,
-        or Rescan to look for the Pi camera.
+        No cameras configured. Use [+] to add a camera or look for
+        the Pi camera.
       </div>
       <button id="addCameraBtn" title="Add camera">[+]</button>
-      <button id="rescanBtn" class="hidden" title="Retry Pi camera detection without restarting the service">Rescan for Pi camera</button>
     </section>
 
     <section id="countsSection">
@@ -86,220 +85,213 @@
   </div>
 </div>
 
-<div id="rtspCameraModal" class="hidden cam-dialog" role="dialog" aria-modal="true">
-  <div class="modal-box cam-modal-box">
-    <button id="rtspClose" aria-label="Close">×</button>
+<div id="camAddModal" class="hidden cam-dialog" role="dialog" aria-modal="true" aria-labelledby="camAddTitle">
+  <div class="modal-box add-modal-box">
+    <button id="camAddClose" aria-label="Close">×</button>
     <div class="cam-modal-head">
-      <div id="rtspEyebrow" class="cam-eyebrow">ADD CAMERA</div>
-      <h2 id="rtspTitle">Add camera</h2>
+      <div class="cam-eyebrow">ADD CAMERA</div>
+      <h2 id="camAddTitle">Choose a camera</h2>
     </div>
-    <div class="tab-bar" role="tablist">
-      <button type="button" role="tab" id="rtspTabConn" class="tab-btn active" aria-selected="true">Connection <span class="tab-dot hidden"></span></button>
-      <button type="button" role="tab" id="rtspTabDet" class="tab-btn" aria-selected="false">Detection <span class="tab-dot hidden"></span></button>
+    <div class="add-body">
+      <div class="add-section-head">
+        <span class="add-section-label">Found on this device</span>
+        <button type="button" id="camAddScanBtn" class="link-btn">↻ Scan</button>
+      </div>
+      <div id="camAddFound" class="add-list"></div>
+      <div class="add-section-head"><span class="add-section-label">Add manually</span></div>
+      <div id="camAddManual" class="add-list"></div>
     </div>
-    <form id="rtspForm">
-      <div id="rtspMainPanel" class="tab-panel">
-        <div class="cam-form-row1">
-          <label class="cam-name-field">Name <span class="hint">must be unique</span>
-            <input type="text" name="name" required maxlength="64"></label>
-          <div class="cam-icon-field">
-            <span class="cam-field-label">Icon</span>
-            <div id="rtspIconPicker" class="icon-picker" role="radiogroup" aria-label="Icon"></div>
+  </div>
+</div>
+
+<!-- One modal for every camera type. Type-specific tabs live in a
+     .cam-type-fields block per type (see CAM_TYPES in app.js); the
+     Detection and Watchlist tabs are shared and filled by app.js. -->
+<div id="camModal" class="hidden cam-dialog" role="dialog" aria-modal="true" aria-labelledby="camEyebrow">
+  <div class="modal-box cam-modal-box">
+    <button id="camClose" aria-label="Close">×</button>
+    <div class="cam-modal-head">
+      <div id="camEyebrow" class="cam-eyebrow">ADD CAMERA</div>
+      <div class="cam-head-row">
+        <div class="cam-icon-wrap">
+          <button type="button" id="camIconBtn" class="cam-icon-btn" aria-haspopup="true" aria-expanded="false" aria-controls="camIconPop"></button>
+          <div id="camIconPop" class="icon-pop hidden">
+            <div id="camIconPicker" class="icon-picker" role="radiogroup" aria-label="Icon"></div>
           </div>
         </div>
-        <div class="cam-form-grid">
-          <fieldset class="cam-card"><legend>Connection</legend>
-            <div class="form-row">
-              <label class="fld-scheme">Scheme
-                <select name="scheme">
-                  <option value="rtsp">rtsp</option>
-                  <option value="rtsps">rtsps</option>
-                </select></label>
-              <label>Host / IP
-                <input type="text" name="host" required placeholder="192.168.1.50"></label>
-              <label class="fld-port">Port
-                <input type="number" name="port" value="554" min="1" max="65535"></label>
+        <input type="text" id="camName" name="name" form="camForm" class="cam-name-input" maxlength="64"
+          placeholder="Camera name" aria-label="Camera name (must be unique)" autocomplete="off">
+      </div>
+    </div>
+    <div id="camTabBar" class="tab-bar" role="tablist"></div>
+    <form id="camForm" novalidate>
+      <div id="camBody" class="cam-body">
+
+        <div id="rtspFields" class="cam-type-fields">
+          <div id="rtspConnPanel" class="tab-panel">
+            <div class="cam-form-grid">
+              <fieldset class="cam-card"><legend>Stream</legend>
+                <div class="form-row">
+                  <label class="fld-scheme">Scheme
+                    <select name="scheme">
+                      <option value="rtsp">rtsp</option>
+                      <option value="rtsps">rtsps</option>
+                    </select></label>
+                  <label>Host / IP
+                    <input type="text" name="host" placeholder="192.168.1.50"></label>
+                  <label class="fld-port">Port
+                    <input type="number" name="port" value="554" min="1" max="65535"></label>
+                </div>
+                <label>Path <span class="tip" tabindex="0" data-tip="{stream} is replaced by the Stream choice. Use the camera's own path when in doubt.">i</span>
+                  <input type="text" name="path" value="/" placeholder="/h264/ch1/{stream}/av_stream"></label>
+                <div class="form-row">
+                  <label>Stream
+                    <select name="stream">
+                      <option value="main">Mainstream</option>
+                      <option value="sub">Substream</option>
+                    </select></label>
+                  <label>Transport
+                    <select name="transport">
+                      <option value="tcp">TCP (default)</option>
+                      <option value="udp">UDP</option>
+                    </select></label>
+                </div>
+                <div class="resolved-url"><span class="resolved-label">URL</span><code id="resolvedUrl"></code></div>
+              </fieldset>
+              <fieldset class="cam-card has-check"><legend>Access</legend>
+                <label class="card-check"><input type="checkbox" name="credentials_on"> Requires credentials</label>
+                <div class="form-row">
+                  <label>Username
+                    <input type="text" name="username" autocomplete="off"></label>
+                  <label>Password <span class="tip" tabindex="0" data-tip="When editing, leave blank to keep the stored password. It is never shown back.">i</span>
+                    <input type="password" name="password" autocomplete="off"></label>
+                </div>
+                <label id="rtspSelfSignedRow" class="fld-inline hidden"><input type="checkbox" name="tls_allow_self_signed"> Allow self-signed certificate</label>
+              </fieldset>
             </div>
-            <label>Path
-              <input type="text" name="path" value="/" placeholder="/h264/ch1/{stream}/av_stream">
-              <span class="hint">{stream} is replaced by the Stream choice. Use the camera's own path when in doubt.</span></label>
-            <div class="form-row">
-              <label>Stream
-                <select name="stream">
-                  <option value="main">Mainstream</option>
-                  <option value="sub">Substream</option>
-                </select></label>
-              <label>Transport
-                <select name="transport">
-                  <option value="tcp">TCP (default)</option>
-                  <option value="udp">UDP</option>
-                </select></label>
+          </div>
+          <div id="rtspCapturePanel" class="tab-panel hidden">
+            <div class="cam-form-grid">
+              <fieldset class="cam-card"><legend>Capture</legend>
+                <div class="form-row">
+                  <label>Rotate
+                    <select name="rotate">
+                      <option value="0">0°</option>
+                      <option value="90">90°</option>
+                      <option value="180">180°</option>
+                      <option value="270">270°</option>
+                    </select></label>
+                  <label class="fld-check"><input type="checkbox" name="start_paused"> Start paused</label>
+                </div>
+                <label>Snapshot URL <span class="dim">optional</span> <span class="tip" tabindex="0" data-tip="If set, polls over HTTP; falls back to RTSP when the fetch fails.">i</span>
+                  <input type="text" name="snapshot_url" placeholder="http://192.168.1.50/snapshot.jpg"></label>
+              </fieldset>
+              <fieldset class="cam-card"><legend>Connection</legend>
+                <div class="form-row">
+                  <label class="fld-mode">Mode <span class="tip" tabindex="0" data-tip="Persistent keeps the stream open. Per-capture frees the camera for other apps between grabs; each capture pays a reconnect + keyframe wait.">i</span>
+                    <select name="connection_mode">
+                      <option value="persistent">Persistent</option>
+                      <option value="per-capture">Per-capture</option>
+                    </select></label>
+                  <label class="fld-timeout">Timeout
+                    <span class="suffix-input"><input type="number" name="timeout_s" value="10" min="1" max="120"><span>sec</span></span></label>
+                </div>
+              </fieldset>
             </div>
-            <div class="form-row">
-              <label class="fld-mode">Connection mode
-                <select name="connection_mode">
-                  <option value="persistent">Persistent</option>
-                  <option value="per-capture">Per-capture</option>
-                </select>
-                <span class="hint">Frees the camera for other apps between grabs; each capture pays a reconnect + keyframe wait.</span></label>
-              <label class="fld-timeout">Timeout
-                <span class="suffix-input"><input type="number" name="timeout_s" value="10" min="1" max="120"><span>sec</span></span></label>
-            </div>
-            <div class="resolved-url"><span class="resolved-label">Resolved URL</span><code id="resolvedUrl"></code></div>
-          </fieldset>
-          <div class="cam-form-right">
-            <fieldset class="cam-card has-check"><legend>Access</legend>
-              <label class="card-check"><input type="checkbox" name="credentials_on"> Requires credentials</label>
-              <div class="form-row">
-                <label>Username
-                  <input type="text" name="username" autocomplete="off"></label>
-                <label>Password
-                  <input type="password" name="password" autocomplete="off"></label>
-              </div>
-              <span class="hint">Leave blank to keep the stored password. It is never shown back.</span>
-              <label id="rtspSelfSignedRow" class="hidden"><input type="checkbox" name="tls_allow_self_signed"> Allow self-signed certificate (rtsps only)</label>
-            </fieldset>
-            <fieldset class="cam-card"><legend>Capture</legend>
-              <div class="form-row">
-                <label>Rotate
-                  <select name="rotate">
-                    <option value="0">0°</option>
-                    <option value="90">90°</option>
-                    <option value="180">180°</option>
-                    <option value="270">270°</option>
-                  </select></label>
-                <label class="fld-check"><input type="checkbox" name="start_paused"> Start paused</label>
-              </div>
-              <label>Snapshot URL <span class="hint">optional</span>
-                <input type="text" name="snapshot_url" placeholder="http://192.168.1.50/snapshot.jpg">
-                <span class="hint">If set, polls over HTTP; falls back to RTSP when the fetch fails.</span></label>
-            </fieldset>
           </div>
         </div>
+
+        <div id="piFields" class="cam-type-fields">
+          <div id="piCameraPanel" class="tab-panel">
+            <div class="cam-form-grid">
+              <fieldset class="cam-card"><legend>Sensor</legend>
+                <div class="sensor-status"><span id="piSensorDot" class="dot online"></span><span id="piSensorStatus">Detected</span> · <span id="piSensorModel">Unknown</span></div>
+                <div class="form-row">
+                  <label>Camera port <span class="ro-field" id="piSensorPort">CSI 0</span></label>
+                  <label>Resolution <span class="ro-field" id="piSensorRes">—</span></label>
+                </div>
+              </fieldset>
+              <fieldset class="cam-card"><legend>Capture</legend>
+                <div class="form-row">
+                  <label>Rotate
+                    <select name="rotate">
+                      <option value="0">0°</option>
+                      <option value="90">90°</option>
+                      <option value="180">180°</option>
+                      <option value="270">270°</option>
+                    </select></label>
+                  <label class="fld-check"><input type="checkbox" name="start_paused"> Start paused</label>
+                </div>
+                <label class="fld-inline"><input type="checkbox" name="awb_enable" checked> Auto white balance (AWB) <span class="tip" tabindex="0" data-tip="Turn off to lock the current colour balance, useful when a scene's lighting makes colours drift.">i</span></label>
+              </fieldset>
+            </div>
+          </div>
+          <div id="piExposurePanel" class="tab-panel hidden">
+            <div class="cam-form-grid">
+              <div class="cam-form-col">
+                <div class="pi-preview">
+                  <img id="piPreviewImg" alt="Preview frame">
+                  <button type="button" id="piPreviewRefresh">↻ Refresh</button>
+                </div>
+                <div id="piPreviewMeta" class="hint"></div>
+              </div>
+              <fieldset class="cam-card"><legend>Exposure</legend>
+                <div class="seg-row">
+                  <div class="seg" role="radiogroup" aria-label="Exposure mode">
+                    <button type="button" id="piExpAutoBtn" class="seg-btn active" aria-pressed="true">Auto</button>
+                    <button type="button" id="piExpManualBtn" class="seg-btn" aria-pressed="false">Manual</button>
+                  </div>
+                </div>
+                <div id="piExpAutoFields">
+                  <label>AE exposure mode
+                    <select id="piAeMode">
+                      <option value="">Default</option>
+                      <option value="Short">Short</option>
+                      <option value="Normal">Normal</option>
+                      <option value="Long">Long</option>
+                    </select></label>
+                  <label>Compensation <span class="dim">EV</span>
+                    <span class="slider-row"><input type="range" id="piEvSlider" min="-8" max="8" step="0.5" value="0"><span class="readout" id="piEvOut">+0.0</span></span></label>
+                  <p class="hint">The camera picks shutter and gain. Use compensation to brighten or darken.</p>
+                </div>
+                <div id="piExpManualFields" class="hidden">
+                  <div class="form-row">
+                    <label>Shutter
+                      <span class="suffix-input"><input type="number" id="piShutter" value="20000" min="1" max="10000000"><span>µs</span></span></label>
+                    <label>Analogue gain
+                      <span class="suffix-input"><input type="number" id="piGain" value="1.0" step="0.1" min="1" max="16"><span>×</span></span></label>
+                  </div>
+                  <p class="hint">Fixed shutter and gain. 20,000 µs = 1/50 s.</p>
+                </div>
+              </fieldset>
+            </div>
+          </div>
+        </div>
+
+        <div id="camDetPanel" class="tab-panel hidden"></div>
+        <div id="camWatchPanel" class="tab-panel hidden"></div>
       </div>
-      <div id="rtspDetPanel" class="tab-panel hidden"></div>
-      <div id="rtspTestResult" class="test-result hidden">
-        <img id="rtspTestThumb" alt="Connection test thumbnail">
-        <div id="rtspTestMeta"></div>
-      </div>
-      <div id="rtspError" class="error"></div>
+      <div id="camError" class="cam-error" role="alert"></div>
       <div class="form-actions">
         <div class="form-actions-left">
-          <button type="button" id="rtspTestBtn">↻ Test connection</button>
-          <span class="hint">Tip: pick H.264 on the camera — H.265 is costly to decode on a Pi 4.</span>
+          <button type="button" id="camTestBtn">Test</button>
+          <span id="camTestTip" class="tip" tabindex="0" data-tip="">i</span>
+          <div id="camTestStatus" class="test-status hidden" role="status">
+            <img id="camTestThumb" class="hidden" alt="Test frame (click to enlarge)">
+            <span id="camTestMeta"></span>
+          </div>
         </div>
         <div class="form-actions-right">
-          <button type="button" id="rtspCancelBtn">Cancel</button>
-          <button type="submit" id="rtspSaveBtn">Add</button>
+          <button type="button" id="camCancelBtn">Cancel</button>
+          <button type="submit" id="camSaveBtn">Add</button>
         </div>
       </div>
     </form>
   </div>
 </div>
 
-<div id="piCameraModal" class="hidden cam-dialog" role="dialog" aria-modal="true">
-  <div class="modal-box cam-modal-box">
-    <button id="piClose" aria-label="Close">×</button>
-    <div class="cam-modal-head">
-      <div id="piEyebrow" class="cam-eyebrow">EDIT PI CAMERA</div>
-      <h2 id="piTitle">Pi Camera</h2>
-    </div>
-    <div class="tab-bar" role="tablist">
-      <button type="button" role="tab" id="piTabCam" class="tab-btn active" aria-selected="true">Camera <span class="tab-dot hidden"></span></button>
-      <button type="button" role="tab" id="piTabDet" class="tab-btn" aria-selected="false">Detection <span class="tab-dot hidden"></span></button>
-    </div>
-    <form id="piForm">
-      <div id="piMainPanel" class="tab-panel">
-        <div class="cam-form-row1">
-          <label class="cam-name-field">Name <span class="hint">must be unique</span>
-            <input type="text" name="name" required maxlength="64"></label>
-          <div class="cam-icon-field">
-            <span class="cam-field-label">Icon</span>
-            <div id="piIconPicker" class="icon-picker" role="radiogroup" aria-label="Icon"></div>
-          </div>
-        </div>
-        <div class="cam-form-grid pi-grid">
-          <div class="cam-form-col">
-            <fieldset class="cam-card"><legend>Sensor</legend>
-              <div class="sensor-status"><span id="piSensorDot" class="dot online"></span><span id="piSensorStatus">Detected</span> · <span id="piSensorModel">Unknown</span></div>
-              <div class="form-row">
-                <label>Camera port <span class="ro-field" id="piSensorPort">CSI 0</span></label>
-                <label>Resolution <span class="ro-field" id="piSensorRes">—</span></label>
-              </div>
-            </fieldset>
-            <fieldset class="cam-card"><legend>Capture</legend>
-              <div class="form-row">
-                <label>Rotate
-                  <select name="rotate">
-                    <option value="0">0°</option>
-                    <option value="90">90°</option>
-                    <option value="180">180°</option>
-                    <option value="270">270°</option>
-                  </select></label>
-                <label class="fld-check"><input type="checkbox" name="start_paused"> Start paused</label>
-              </div>
-            </fieldset>
-            <fieldset class="cam-card has-check"><legend>White balance</legend>
-              <label class="card-check"><input type="checkbox" name="awb_enable" checked> Auto (AWB)</label>
-              <p class="hint">Turn off to lock the current colour balance, useful when a scene's lighting makes colours drift.</p>
-            </fieldset>
-          </div>
-          <fieldset class="cam-card"><legend>Exposure</legend>
-            <div class="seg-row">
-              <div class="seg" role="radiogroup" aria-label="Exposure mode">
-                <button type="button" id="piExpAutoBtn" class="seg-btn active" aria-pressed="true">Auto</button>
-                <button type="button" id="piExpManualBtn" class="seg-btn" aria-pressed="false">Manual</button>
-              </div>
-            </div>
-            <div class="pi-preview">
-              <img id="piPreviewImg" alt="Preview frame">
-              <button type="button" id="piPreviewRefresh">↻ Refresh</button>
-            </div>
-            <div id="piPreviewMeta" class="hint"></div>
-            <div id="piExpAutoFields">
-              <div class="form-row">
-                <label>AE exposure mode
-                  <select id="piAeMode">
-                    <option value="">Default</option>
-                    <option value="Short">Short</option>
-                    <option value="Normal">Normal</option>
-                    <option value="Long">Long</option>
-                  </select></label>
-                <label>Compensation <span class="hint">EV</span>
-                  <span class="slider-row"><input type="range" id="piEvSlider" min="-8" max="8" step="0.5" value="0"><span class="readout" id="piEvOut">+0.0</span></span></label>
-              </div>
-              <p class="hint">The camera picks shutter and gain. Use compensation to brighten or darken.</p>
-            </div>
-            <div id="piExpManualFields" class="hidden">
-              <div class="form-row">
-                <label>Shutter
-                  <span class="suffix-input"><input type="number" id="piShutter" value="20000" min="1" max="10000000"><span>µs</span></span></label>
-                <label>Analogue gain
-                  <span class="suffix-input"><input type="number" id="piGain" value="1.0" step="0.1" min="1" max="16"><span>×</span></span></label>
-              </div>
-              <p class="hint">Fixed shutter and gain. 20,000 µs = 1/50 s.</p>
-            </div>
-          </fieldset>
-        </div>
-      </div>
-      <div id="piDetPanel" class="tab-panel hidden"></div>
-      <div id="piTestResult" class="test-result hidden">
-        <div id="piTestMeta"></div>
-      </div>
-      <div id="piError" class="error"></div>
-      <div class="form-actions">
-        <div class="form-actions-left">
-          <button type="button" id="piTestBtn">◉ Test capture</button>
-          <span class="hint">Grabs a fresh frame to preview the current exposure.</span>
-        </div>
-        <div class="form-actions-right">
-          <button type="button" id="piCancelBtn">Cancel</button>
-          <button type="submit" id="piSaveBtn">Save</button>
-        </div>
-      </div>
-    </form>
-  </div>
-</div>
+<div id="camThumbZoom" class="thumb-zoom hidden"><img id="camThumbZoomImg" alt="Test frame"></div>
+<div id="tipPop" class="tip-pop hidden" role="tooltip"></div>
 
 <div id="settingsModal" class="hidden cam-dialog" role="dialog" aria-modal="true">
   <div class="modal-box svc-modal-box">

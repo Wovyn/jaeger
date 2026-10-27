@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - Repository renamed Wovyn/muse-pi-yolo-mqtt -> Wovyn/jaeger (Oct 24, 2026, in place on GitHub); local folder now ~/projects/jaeger, MQTT service identity now "jaeger", docs and service paths updated. No version change; MQTT topic tree unchanged (already Jaeger).
+- Web UI: compact camera modal (Oct 25, 2026). The RTSP and Pi modals
+  are now one shared modal driven by a camera-type registry
+  (`CAM_TYPES` in static/app.js), so a new camera type adds an entry
+  and its own tab panels instead of a third copy of the modal. Four
+  tabs per type: RTSP Connection | Capture, Pi Camera | Exposure, then
+  the shared Detection and Watchlist (the watchlist moved to its own
+  full-width tab, with the selected count on the tab). Name and icon
+  moved into the header (icon is a pop-over picker); long hints became
+  "i" tips; the modal has a fixed height (min(90vh, 640px)) with only
+  the tab body scrolling, so it no longer scrolls on a 1366x768 screen
+  (was 819-930px tall). Test connection / Test capture results show as
+  a status pill in the footer (thumbnail opens full size) instead of a
+  block that grew the modal.
+- Web UI: [+] opens an Add camera chooser: "Found on this device"
+  (types with discovery; today the Pi camera, shown as added or with a
+  Retry detection action that replaces the Rescan for Pi camera button)
+  and "Add manually" (Network camera (RTSP)).
+- Fix: editing a camera no longer resets "Confirm absent"
+  (disappear_confirm_cycles) to 4; the stored value is now loaded.
+- Fix: Pi Test capture now reports its result (it read the
+  /api/cameras response as a list and stopped at "Capturing...").
 
 ## [0.3.0] - 2026-10-16
 
