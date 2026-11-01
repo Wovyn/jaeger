@@ -3,7 +3,7 @@
   "use strict";
   var state = {
     cameras: [],
-    selectedCamera: null,
+    selectedCamera: null, camerasRendered: false,
     events: [],
     eventsCursor: null,
     eventsHasMore: true,
@@ -150,6 +150,7 @@
       state.lastStatus = s;
       state.startedAt = s.started_at || null;
       $("version").textContent = "v" + s.version;
+      var av = $("aboutVersion"); if (av) av.textContent = "v" + s.version;
       var dot = $("statusDot");
       dot.className = "dot " + (s.mqtt_connected ? "online" : "offline");
       dot.title = s.mqtt_connected ? "MQTT connected" : "MQTT disconnected";
@@ -162,11 +163,15 @@
     return api("/api/cameras").then(function (r) {
       state.cameras = r.cameras || [];
       if (!state.selectedCamera && state.cameras.length) {
-        state.selectedCamera = state.cameras[0].camera_id;
+        var firstActive = null;
+        state.cameras.forEach(function (c) {
+          if (!firstActive && !c.paused) firstActive = c;
+        });
+        state.selectedCamera = (firstActive || state.cameras[0]).camera_id;
       }
       renderCameras();
       renderCameraFilter();
-    });
+    }).catch(function () { state.camerasRendered = true; var cl = $("camerasLoading"); if (cl) cl.classList.add("hidden"); var ce = $("camerasError"); if (ce) ce.classList.remove("hidden"); });
   }
 
   function grabSplit(c) {
@@ -176,7 +181,7 @@
   }
 
   function renderCameras() {
-    var list = $("cameraList");
+    var list = $("cameraList"); var ce0 = $("camerasError"); if (ce0) ce0.classList.add("hidden"); if (!state.camerasRendered) { state.camerasRendered = true; var cl = $("camerasLoading"); if (cl) cl.classList.add("hidden"); }
     list.innerHTML = "";
     state.cameras.forEach(function (c) {
       var li = document.createElement("li");
@@ -206,13 +211,17 @@
       controls.className = "cam-controls";
       var pauseBtn = document.createElement("button");
       pauseBtn.textContent = c.paused ? "Resume" : "Pause";
-      pauseBtn.title = c.paused ? "Resume this camera" : "Pause this camera (disconnects the RTSP stream)";
+      var pauseTitle = "Pause this camera";
+      if (c.type === "rtsp") pauseTitle = "Pause this camera (disconnects the RTSP stream)";
+      else if (c.type === "usb") pauseTitle = "Pause this camera (disconnects the USB camera)";
+      pauseBtn.title = c.paused ? "Resume this camera" : pauseTitle;
       pauseBtn.addEventListener("click", function (e) {
         e.stopPropagation();
         api("/api/cameras/" + encodeURIComponent(c.camera_id) +
           (c.paused ? "/resume" : "/pause"),
           { method: "POST" }).then(function () {
-            loadCameras(); loadStatus();
+            loadCameras().then(function () { loadLatest(); });
+            loadStatus();
           }).catch(function (err) { alert("Failed: " + err.message); });
       });
       controls.appendChild(pauseBtn);
@@ -248,6 +257,7 @@
         state.selectedCamera = c.camera_id;
         renderCameras();
         loadCounts();
+        clearLatest();
         loadLatest();
       });
       list.appendChild(li);
@@ -474,36 +484,80 @@
     if (n >= 0 && n < state.events.length) openModal(n);
   }
 
+  function selectedCam() {
+    var i;
+    for (i = 0; i < state.cameras.length; i++) {
+      if (state.cameras[i].camera_id === state.selectedCamera) return state.cameras[i];
+    }
+    return null;
+  }
+  function clearLatest() {
+    var img = $("latestImg");
+    if (img) img.removeAttribute("src");
+    var o = $("latestOverlay");
+    if (o) o.innerHTML = "";
+    var ph = $("latestPaused");
+    if (ph) ph.classList.add("hidden"); var ld = $("latestLoading"); if (ld) { ld.textContent = "Loading latest frame…"; ld.classList.remove("hidden"); }
+    if (img) img.classList.add("hidden");
+  }
+  function showPausedLatest(cam) {
+    var img = $("latestImg");
+    if (img) { img.removeAttribute("src"); img.classList.add("hidden"); }
+    var o = $("latestOverlay");
+    if (o) o.innerHTML = "";
+    var txt = $("latestPausedText");
+    if (txt) txt.textContent = cam.name + " is paused - no live frame";
+    var ph = $("latestPaused");
+    if (ph) ph.classList.remove("hidden"); var ld = $("latestLoading"); if (ld) ld.classList.add("hidden");
+    $("latestMeta").textContent = cam.name + " is paused.";
+    $("latestDets").innerHTML = "";
+  }
   // ---- latest frame ----
   function loadLatest() {
-    if (!state.selectedCamera) return Promise.resolve();
+    var cam = selectedCam();
+    if (!state.selectedCamera) { clearLatest(); var ld = $("latestLoading"); if (ld) ld.textContent = "No camera selected"; $("latestMeta").textContent = ""; $("latestDets").innerHTML = ""; return Promise.resolve(); }
+    if (cam && cam.paused) { showPausedLatest(cam); return Promise.resolve(); }
     loadLatestDets();
     return api("/api/latest?camera=" + encodeURIComponent(state.selectedCamera))
       .then(function (r) {
-        $("latestImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
+        if (r.camera_id && r.camera_id !== state.selectedCamera) return;
+        var nowCam = selectedCam();
+        if (nowCam && nowCam.paused) { showPausedLatest(nowCam); return; }
+        var ld = $("latestLoading"); if (ld) ld.classList.add("hidden"); $("latestImg").classList.remove("hidden"); $("latestImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
         $("latestMeta").textContent =
           fmtLocal(r.timestamp) + " · " + countsSummary(r.counts);
-      }).catch(function () { /* no frame yet */ });
+      }).catch(function () { clearLatest(); var ld = $("latestLoading"); if (ld) ld.textContent = "No frame available"; $("latestMeta").textContent = "No frame available"; $("latestDets").innerHTML = ""; });
   }
-  // Weak (sub-threshold) detections are a Latest Frame diagnostic only:
-  // text list, no bbox overlay. Confirmed entries render in normal text,
-  // weak entries are muted with a "(weak)" marker.
+  // Weak (sub-threshold) detections are a Latest Frame diagnostic only.
+  // Confirmed entries render in normal text, weak entries are muted with
+  // a "(weak)" marker, and both are drawn as bounding boxes over the
+  // latest frame (solid for confirmed, dashed and muted for weak).
   function loadLatestDets() {
-    if (!state.selectedCamera) return;
+    if (!state.selectedCamera) { var o = $("latestOverlay"); if (o) o.innerHTML = ""; return; }
+    var dc = selectedCam();
+    if (dc && dc.paused) { showPausedLatest(dc); return; }
     api("/api/latest_meta?camera=" + encodeURIComponent(state.selectedCamera))
       .then(renderLatestDets)
-      .catch(function () { /* no frame yet */ });
+      .catch(function () { var o = $("latestOverlay"); if (o) o.innerHTML = ""; });
   }
   function renderLatestDets(m) {
+    if (m.camera_id && m.camera_id !== state.selectedCamera) return;
+    var rc = selectedCam();
+    if (rc && rc.paused) { showPausedLatest(rc); return; }
     var el = $("latestDets");
+    var overlay = $("latestOverlay");
+    if (overlay) overlay.innerHTML = "";
     var items = [];
+    var boxes = [];
     Object.keys(m.detections || {}).forEach(function (cls) {
       (m.detections[cls] || []).forEach(function (d) {
         items.push({ label: cls + " " + d.confidence.toFixed(2), weak: false });
+        boxes.push({ label: cls + " " + d.confidence.toFixed(2), bbox: d.bbox, weak: false });
       });
     });
     (m.weak_detections || []).forEach(function (w) {
       items.push({ label: w.class + " " + w.confidence.toFixed(2) + " (weak)", weak: true });
+      boxes.push({ label: w.class + " " + w.confidence.toFixed(2) + " (weak)", bbox: w.bbox, weak: true });
     });
     el.innerHTML = "";
     if (!items.length) {
@@ -520,6 +574,22 @@
       el.appendChild(s);
       el.appendChild(document.createTextNode("  "));
     });
+    if (overlay) {
+      boxes.forEach(function (b) {
+        if (!b.bbox || b.bbox.length !== 4) return;
+        var box = document.createElement("div");
+        box.className = b.weak ? "latest-box weak" : "latest-box";
+        box.style.left = (b.bbox[0] * 100) + "%";
+        box.style.top = (b.bbox[1] * 100) + "%";
+        box.style.width = ((b.bbox[2] - b.bbox[0]) * 100) + "%";
+        box.style.height = ((b.bbox[3] - b.bbox[1]) * 100) + "%";
+        var lab = document.createElement("span");
+        lab.className = "latest-box-label";
+        lab.textContent = b.label;
+        box.appendChild(lab);
+        overlay.appendChild(box);
+      });
+    }
   }
 
 
@@ -1739,7 +1809,7 @@
   }
 
   function openServiceSettings(panel) {
-    panel = panel || "storage";
+    panel = panel || "general";
     $("svcError").textContent = "";
     $("mqttTestStatus").textContent = "";
     $("mqttTestStatus").className = "mqtt-status";
@@ -1806,6 +1876,20 @@
     ["mqttHost", "mqttPort", "mqttTls", "mqttTopicRoot", "mqttUsername", "mqttPassword", "mqttTestBtn"].forEach(function (id) {
       $(id).disabled = !on;
     });
+    var sw = $("mqttSwitch");
+    if (sw) {
+      sw.setAttribute("aria-checked", on ? "true" : "false");
+      $("mqttSwitchText").textContent = on ? "Enabled" : "Disabled";
+    }
+    var fields = $("mqttFields"); if (fields) fields.classList.toggle("svc-dim", !on);
+    var foot = $("mqttFoot"); if (foot) foot.classList.toggle("svc-dim", !on);
+    var dot = $("svcMqttDot"); if (dot) dot.classList.toggle("hidden", !on);
+    updateMqttScheme();
+  }
+
+  function updateMqttScheme() {
+    var sc = $("mqttScheme");
+    if (sc) sc.textContent = $("mqttTls").checked ? "mqtts://" : "mqtt://";
   }
 
   // ---- Portal port move (General panel) ----
@@ -2043,8 +2127,17 @@
       b.addEventListener("click", function () { switchSvcPanel(b.dataset.svcPanel); });
     });
     $("mqttEnabled").addEventListener("change", updateMqttToggles);
+    $("mqttSwitch").addEventListener("click", function () {
+      var cb = $("mqttEnabled");
+      cb.checked = !cb.checked;
+      updateMqttToggles();
+    });
     $("mqttTls").addEventListener("change", function () {
-      if ($("mqttPort").value === "") $("mqttPort").value = $("mqttTls").checked ? 8883 : 1883;
+      var tls = $("mqttTls").checked;
+      if ($("mqttPort").value === "") $("mqttPort").value = tls ? 8883 : 1883;
+      else if (tls && $("mqttPort").value === "1883") $("mqttPort").value = "8883";
+      else if (!tls && $("mqttPort").value === "8883") $("mqttPort").value = "1883";
+      updateMqttScheme();
     });
     $("mqttTestBtn").addEventListener("click", testMqttSettings);
     $("webTestBtn").addEventListener("click", testWebPort);
@@ -2160,6 +2253,15 @@
     });
     loadEvents(true);
     startStream();
+    var latestResumeBtn = $("latestPausedResume");
+    if (latestResumeBtn) latestResumeBtn.addEventListener("click", function () {
+      if (!state.selectedCamera) return;
+      api("/api/cameras/" + encodeURIComponent(state.selectedCamera) + "/resume",
+        { method: "POST" }).then(function () {
+          loadCameras().then(function () { loadLatest(); });
+          loadStatus();
+        }).catch(function (err) { alert("Resume failed: " + err.message); });
+    });
     // Uptime tick only: re-renders from the last fetched status, no fetch.
     setInterval(renderStatusLine, 1000);
   }

@@ -19,7 +19,7 @@ camera lifecycle APIs, Jaeger MQTT tree. A v0.3.0 follow-up committed Oct 23,
 2026 (version unchanged) added the tabbed camera modals and slimmed Service
 settings, asymmetric debounce + weak detections, the event-image Download
 button, and the Detection-tab / About-dialog fixes (including the Wovyn logo).
-Repository renamed to Wovyn/jaeger Oct 24, 2026 (local folder ~/projects/jaeger). v0.4.0 built Oct 25, 2026: MQTT-optional startup with a default config, Service settings left-nav (Storage Limit, Detection Model, MQTT, General) with a connection test, a portal-port setting that restarts the service on the new port, and USB cameras (scan/add/edit, persistent V4L2 capture, UVC exposure/white-balance controls). The production service runs v0.4.0. See DESIGN.md section 16 for the design.
+Repository renamed to Wovyn/jaeger Oct 24, 2026 (local folder ~/projects/jaeger). v0.4.0 built Oct 25, 2026: MQTT-optional startup with a default config, Service settings left-nav (General, Storage limit, Detection model, MQTT) with a connection test, a portal-port setting that restarts the service on the new port, and USB cameras (scan/add/edit, persistent V4L2 capture, UVC exposure/white-balance controls). The production service runs v0.4.0. See DESIGN.md section 16 for the design.
 
 ## Hardware
 
@@ -206,7 +206,7 @@ from the existing camera ids. The config is re-saved automatically.
 ### Run in the foreground (test)
 
 ```bash
-cd ~/projects/jaeger && ./venv/bin/python yolo_sensor.py
+cd ~/projects/jaeger && ./venv/bin/python -u yolo_sensor.py
 ```
 
 The service opens the cameras, loads the shared model, connects to HiveMQ
@@ -216,6 +216,8 @@ per-camera capture threads feed latest-frame slots; one inference worker
 round-robins the cameras; publish on per-class change.
 
 ### Run as a service (systemd)
+Stop the detached foreground process FIRST and confirm it is gone before enabling the unit. Never run both at once: they would fight over port 8082, the cameras, and the MQTT connection.
+Find the running PID, stop it gracefully with kill, and confirm it is gone with ps -p before continuing.
 
 ```bash
 sudo cp yolo-mqtt.service /etc/systemd/system/
@@ -224,7 +226,9 @@ sudo systemctl enable --now yolo-mqtt.service
 systemctl status yolo-mqtt.service
 ```
 
-The unit runs as `musecell` (no sudo at runtime), restarts on failure.
+The unit runs as musecell with no sudo at runtime, restarts on failure after 10 seconds, and auto-starts on boot. It runs the sensor unbuffered (venv/bin/python -u yolo_sensor.py, as in the unit file) so journalctl shows log lines as they happen.
+Until these steps are run, the unit is not enabled and Jaeger does not auto-start on boot. That is why the Oct 26 Pi reboot left Jaeger down until a manual restart.
+Verify with systemctl status yolo-mqtt.service, curl http://127.0.0.1:8082/api/status, and journalctl -u yolo-mqtt.service -f.
 
 ### Remote configuration (MQTT)
 
@@ -377,7 +381,15 @@ see DESIGN.md §13 for the no-auth decision).
   detections, refreshed on every capture.
   Below the image, a text list shows the current detections with
   confidences ("car 0.83"); sub-threshold ("weak") detections appear
-  muted with a "(weak)" marker.
+  muted with a "(weak)" marker. The image also carries a bounding-box
+  overlay: confirmed detections get a solid green box with a
+  "name 0.81" label, weak detections a dashed amber box with a
+  "(weak)" label. If the selected camera is paused, the panel instead
+  shows "[name] is paused — no live frame" with a Resume button
+  (page load selects the first non-paused camera), and a failed frame
+  fetch shows "No frame available". On first load the panel shows a
+  "Loading latest frame…" placeholder and the cameras list a
+  "Loading cameras…" placeholder until the first data arrives.
 - Cameras panel rows show the icon, name, type, status dot
   (online/degraded/paused/offline), last image-grab time, last inference
   time, and grab timing, with per-row pause/resume + edit + delete
@@ -414,7 +426,7 @@ see DESIGN.md §13 for the no-auth decision).
   sample image (thumbnail + resolution + codec) without persisting
   anything; saving connection changes re-runs the test before persisting.
   On edit, leaving the password blank keeps the stored password.
-- Service settings (hamburger menu) is system-wide only, with a left nav: Storage Limit (image-history ring-buffer limit, with a live In-use bar), Detection Model (shared YOLO model yolov8n / yolov8s), and MQTT (Enable toggle, host, port, TLS, topic root, username, password; blank password keeps the stored password), and General (portal port, with a Check availability button and the current portal URL). One Save applies all panels. Saving an unchanged port restarts nothing; saving a different port (1024-65535) restarts the whole service on the new port after the save response is sent, and every open browser tab is moved automatically (SSE restart broadcast plus poll-new-port-then-old-port fallback in the saving tab). Closed tabs and bookmarks to the old port are not moved — update bookmarks after a move. If the new port becomes unavailable before the restart, the restart is aborted, the saved port reverts to the old port, and the tab falls back to the old port. If the exec that restarts the service fails, the process exits; restart it manually from ~/projects/jaeger with venv/bin/python -u yolo_sensor.py (log: /tmp/svc-v040.log for the current manual launch). When MQTT is enabled, Save tests the connection first; a failed test saves nothing. Changing broker or topic root switches the live client (background reconnect on failure); retained topics under an old topic root are not cleared automatically. Per-camera detection settings live in each camera modal Detection tab, and Pi camera controls in its Camera tab. UI config writes go through the same apply + persist path as MQTT `config/set`.
+- Service settings (hamburger menu) is system-wide only, with a left nav: General (portal port, with a Check availability button and the current portal URL), Storage limit (image-history ring-buffer limit, with a live In-use bar), Detection model (shared YOLO model yolov8n / yolov8s), and MQTT (a single card with an enable switch, broker host with an mqtts:// or mqtt:// scheme prefix that follows the TLS toggle, port, TLS, topic root, username, password; blank password keeps the stored password; the MQTT nav item shows a green dot while MQTT is enabled). One Save applies all panels. Saving an unchanged port restarts nothing; saving a different port (1024-65535) restarts the whole service on the new port after the save response is sent, and every open browser tab is moved automatically (SSE restart broadcast plus poll-new-port-then-old-port fallback in the saving tab). Closed tabs and bookmarks to the old port are not moved — update bookmarks after a move. If the new port becomes unavailable before the restart, the restart is aborted, the saved port reverts to the old port, and the tab falls back to the old port. If the exec that restarts the service fails, the process exits; restart it manually from ~/projects/jaeger with venv/bin/python -u yolo_sensor.py (log: /tmp/svc-v040.log for the current manual launch). When MQTT is enabled, Save tests the connection first; a failed test saves nothing. Changing broker or topic root switches the live client (background reconnect on failure); retained topics under an old topic root are not cleared automatically. Per-camera detection settings live in each camera modal Detection tab, and Pi camera controls in its Camera tab. UI config writes go through the same apply + persist path as MQTT `config/set`.
 
 API (same server, JSON unless noted):
 
