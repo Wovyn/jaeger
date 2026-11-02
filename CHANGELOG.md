@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- README rewritten as a third-party install guide: project overview and feature list first, explicit step-by-step installation (including the systemd unit edits a new installer must make), camera setup per type, and the reference-install specifics moved into labelled examples/notes; the Web UI guide section was also restructured with subheadings for readability; a second readability pass split the remaining dense sections (How it works, camera setup, MQTT detection detail, config.json layout, performance) into shorter paragraphs and lists.
+- Added AGENTS.md: a self-contained installation contract for AI-agent installers (ordered steps, per-step verification, done criteria); README's Installation section now points agents at it.
 - Repository renamed Wovyn/muse-pi-yolo-mqtt -> Wovyn/jaeger (Oct 24, 2026, in place on GitHub); local folder now ~/projects/jaeger, MQTT service identity now "jaeger", docs and service paths updated. No version change; MQTT topic tree unchanged (already Jaeger).
 - Web UI: compact camera modal (Oct 25, 2026). The RTSP and Pi modals
   are now one shared modal driven by a camera-type registry
