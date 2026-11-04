@@ -1,4 +1,4 @@
-"""Jaeger web UI (v0.3.0): embedded HTTP server for Jaeger.
+"""Jaeger web UI (v0.4.0): embedded HTTP server for Jaeger.
 
 Serves the static UI plus a small JSON API backed by the live YoloSensor
 object. Stdlib only. No auth: LAN-only by Scott's decision (DESIGN.md §13).
@@ -113,19 +113,23 @@ class JaegerWebServer:
             def log_message(self, *args):
                 pass
 
-            def _send_bytes(self, data, content_type, status=200):
+            def _send_bytes(self, data, content_type, status=200,
+                            extra_headers=None):
                 body = data if isinstance(data, bytes) else data.encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                for k, v in (extra_headers or {}).items():
+                    self.send_header(k, v)
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(body)
 
-            def _send_json(self, obj, status=200):
+            def _send_json(self, obj, status=200, extra_headers=None):
                 self._send_bytes(json.dumps(obj), "application/json",
-                                 status=status)
+                                 status=status,
+                                 extra_headers=extra_headers)
 
             def _send_error_json(self, status, message):
                 self._send_json({"error": message}, status=status)
@@ -196,6 +200,10 @@ class JaegerWebServer:
                         self._api_latest_meta(params)
                     elif path == "/api/stream":
                         self._api_stream()
+                    elif path == "/api/mqtt/settings":
+                        self._api_mqtt_settings_get()
+                    elif path == "/api/cameras/usb/scan":
+                        self._api_usb_scan()
                     elif path == "/api/config":
                         self._api_config_get(params)
                     elif path == "/api/classes":
@@ -213,7 +221,11 @@ class JaegerWebServer:
             def do_POST(self):
                 parsed = urlparse(self.path)
                 try:
-                    if parsed.path == "/api/config":
+                    if parsed.path == "/api/mqtt/test":
+                        self._api_mqtt_test()
+                    elif parsed.path == "/api/web/test-port":
+                        self._api_web_test_port()
+                    elif parsed.path == "/api/config":
                         self._api_config_post()
                     elif parsed.path == "/api/capture_now":
                         self._api_capture_now()
@@ -306,18 +318,21 @@ class JaegerWebServer:
                     "model": getattr(s, "model_name", None),
                     "saturation": s.saturation(),
                     "mqtt_connected": bool(s.mqtt_connected),
+                    "mqtt_configured": bool(getattr(s, "mqtt_configured", False)),
                     "uptime_seconds": uptime,
                     "started_at": s.started_at,
                     "last_cycle_seconds": s.last_cycle_seconds,
                     "last_cycle_at": s.last_cycle_at,
                     "cameras": [c["id"] for c in s.cameras],
+                    "web_port": s.current_web_port() if hasattr(
+                        s, "current_web_port") else 8082,
                     "buffer": {
                         "files": total_files,
                         "bytes": total_bytes,
                         "cap_bytes": s.config["buffer"].get(
                             "cap_bytes", 2 ** 30),
                     },
-                })
+                }, extra_headers={"Access-Control-Allow-Origin": "*"})
 
             def _api_cameras(self):
                 s = sensor_ref
@@ -365,6 +380,8 @@ class JaegerWebServer:
 
             def _api_events(self, params):
                 s = sensor_ref
+                id_to_name = {c["id"]: c["cfg"].get("name", c["id"])
+                              for c in s.cameras}
                 cam_id = params.get("camera", [None])[0]
                 class_filter = params.get("class", [None])[0]
                 before = params.get("before", [None])[0]
@@ -405,6 +422,9 @@ class JaegerWebServer:
                         entry = {
                             "event_id": data.get("event_id", stem),
                             "camera_id": data.get("camera_id", cid),
+                            "camera_name": id_to_name.get(
+                                data.get("camera_id", cid),
+                                data.get("camera_id", cid)),
                             "timestamp": data.get("timestamp")
                             or _ts_from_filename(stem),
                             "counts": data.get("counts", {}),
@@ -421,6 +441,7 @@ class JaegerWebServer:
                         entries.append({
                             "event_id": stem,
                             "camera_id": cid,
+                            "camera_name": id_to_name.get(cid, cid),
                             "timestamp": _ts_from_filename(stem),
                             "counts": {},
                             "detections": {},
@@ -594,7 +615,8 @@ class JaegerWebServer:
                 for k, v in body.items():
                     if k == "camera_id":
                         continue
-                    if k in ("model", "buffer_cap_mb"):
+                    if k in ("model", "buffer_cap_mb", "mqtt",
+                               "web_port"):
                         service_keys[k] = v
                     else:
                         cam_cmd[k] = v
@@ -609,7 +631,24 @@ class JaegerWebServer:
                     if not ok:
                         self._send_error_json(400, result.get("error", "failed"))
                         return
-                    self._send_json({"ok": True})
+                    resp = {"ok": True}
+                    if result.get("restarting"):
+                        # The save response must reach the browser
+                        # BEFORE the service restarts (the main loop
+                        # waits ~0.75s), so the tab can start polling
+                        # the new port. redirect_url comes from the
+                        # request Host header; the client prefers its
+                        # own window.location.hostname.
+                        host = (self.headers.get("Host") or "").split(":")[0]
+                        resp.update({
+                            "restarting": True,
+                            "old_port": result.get("old_port"),
+                            "new_port": result.get("new_port"),
+                            "redirect_url": (
+                                f"http://{host}:{result.get('new_port')}/"
+                                if host else None),
+                        })
+                    self._send_json(resp)
                     return
                 if service_keys:
                     result, ok = sensor_ref.enqueue_web(
@@ -703,6 +742,42 @@ class JaegerWebServer:
                     self._send_error_json(400, result.get("error", "failed"))
                     return
                 self._send_json({"ok": True})
+
+            def _api_mqtt_settings_get(self):
+                self._send_json(sensor_ref.mqtt_settings())
+
+            def _api_mqtt_test(self):
+                body = self._read_json_body()
+                if body is None:
+                    self._send_error_json(400, "need JSON mqtt settings")
+                    return
+                try:
+                    result = sensor_ref.mqtt_test(body)
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                except Exception:
+                    self._send_error_json(500, "mqtt test failed")
+                    return
+                self._send_json(result)
+
+            def _api_web_test_port(self):
+                body = self._read_json_body()
+                if body is None or "port" not in body:
+                    self._send_error_json(400, "need JSON {port}")
+                    return
+                try:
+                    result = sensor_ref.test_web_port(body["port"])
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                except Exception:
+                    self._send_error_json(500, "port test failed")
+                    return
+                self._send_json(result)
+
+            def _api_usb_scan(self):
+                self._send_json(sensor_ref.usb_scan())
 
             def _api_cameras_rescan(self):
                 result, ok = sensor_ref.enqueue_web("rescan", None, {},

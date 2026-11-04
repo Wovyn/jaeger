@@ -88,6 +88,7 @@
   ],
   "model": "yolov8n",
   "mqtt": {
+    "enabled": true,
     "host": "YOUR-HIVEMQ-HOST.hivemq.cloud",
     "password": "YOUR-PASSWORD",
     "port": 8883,

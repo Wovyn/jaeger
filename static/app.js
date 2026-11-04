@@ -3,7 +3,7 @@
   "use strict";
   var state = {
     cameras: [],
-    selectedCamera: null,
+    selectedCamera: null, camerasRendered: false,
     events: [],
     eventsCursor: null,
     eventsHasMore: true,
@@ -15,6 +15,9 @@
     startedAt: null,
     eventsStale: false,
     stream: null,
+    portMoving: false,
+    portMoveAborted: false,
+    svcWebPort: 8082,
     modalIndex: -1,
     editingCameraId: null, // null = add mode
     cameraIcon: "camera",
@@ -128,14 +131,30 @@
     }
   }
 
+  function renderMqttWarn(s) {
+    var warn = $("mqttWarn");
+    if (!warn) return;
+    var msg = "";
+    if (s.mqtt_configured === false) msg = "MQTT is not enabled.";
+    else if (!s.mqtt_connected) msg = "MQTT broker not connected.";
+    if (msg) {
+      $("mqttWarnText").textContent = msg;
+      warn.classList.remove("hidden");
+    } else {
+      warn.classList.add("hidden");
+    }
+  }
+
   function loadStatus() {
     return api("/api/status").then(function (s) {
       state.lastStatus = s;
       state.startedAt = s.started_at || null;
       $("version").textContent = "v" + s.version;
+      var av = $("aboutVersion"); if (av) av.textContent = "v" + s.version;
       var dot = $("statusDot");
       dot.className = "dot " + (s.mqtt_connected ? "online" : "offline");
       dot.title = s.mqtt_connected ? "MQTT connected" : "MQTT disconnected";
+      renderMqttWarn(s);
       renderStatusLine();
     }).catch(function () { /* keep last good state */ });
   }
@@ -144,11 +163,15 @@
     return api("/api/cameras").then(function (r) {
       state.cameras = r.cameras || [];
       if (!state.selectedCamera && state.cameras.length) {
-        state.selectedCamera = state.cameras[0].camera_id;
+        var firstActive = null;
+        state.cameras.forEach(function (c) {
+          if (!firstActive && !c.paused) firstActive = c;
+        });
+        state.selectedCamera = (firstActive || state.cameras[0]).camera_id;
       }
       renderCameras();
       renderCameraFilter();
-    });
+    }).catch(function () { state.camerasRendered = true; var cl = $("camerasLoading"); if (cl) cl.classList.add("hidden"); var ce = $("camerasError"); if (ce) ce.classList.remove("hidden"); });
   }
 
   function grabSplit(c) {
@@ -158,7 +181,7 @@
   }
 
   function renderCameras() {
-    var list = $("cameraList");
+    var list = $("cameraList"); var ce0 = $("camerasError"); if (ce0) ce0.classList.add("hidden"); if (!state.camerasRendered) { state.camerasRendered = true; var cl = $("camerasLoading"); if (cl) cl.classList.add("hidden"); }
     list.innerHTML = "";
     state.cameras.forEach(function (c) {
       var li = document.createElement("li");
@@ -188,13 +211,17 @@
       controls.className = "cam-controls";
       var pauseBtn = document.createElement("button");
       pauseBtn.textContent = c.paused ? "Resume" : "Pause";
-      pauseBtn.title = c.paused ? "Resume this camera" : "Pause this camera (disconnects the RTSP stream)";
+      var pauseTitle = "Pause this camera";
+      if (c.type === "rtsp") pauseTitle = "Pause this camera (disconnects the RTSP stream)";
+      else if (c.type === "usb") pauseTitle = "Pause this camera (disconnects the USB camera)";
+      pauseBtn.title = c.paused ? "Resume this camera" : pauseTitle;
       pauseBtn.addEventListener("click", function (e) {
         e.stopPropagation();
         api("/api/cameras/" + encodeURIComponent(c.camera_id) +
           (c.paused ? "/resume" : "/pause"),
           { method: "POST" }).then(function () {
-            loadCameras(); loadStatus();
+            loadCameras().then(function () { loadLatest(); });
+            loadStatus();
           }).catch(function (err) { alert("Failed: " + err.message); });
       });
       controls.appendChild(pauseBtn);
@@ -230,6 +257,7 @@
         state.selectedCamera = c.camera_id;
         renderCameras();
         loadCounts();
+        clearLatest();
         loadLatest();
       });
       list.appendChild(li);
@@ -254,7 +282,7 @@
     if (!state.selectedCamera) return Promise.resolve();
     return api("/api/counts?camera=" + encodeURIComponent(state.selectedCamera))
       .then(function (r) {
-        $("countsCamera").textContent = "— " + r.camera_id;
+        $("countsCamera").textContent = "— " + cameraName(r.camera_id);
         var list = $("countsList");
         list.innerHTML = "";
         var shown = 0;
@@ -350,7 +378,7 @@
     var timeHtml = "<span class=\"event-time\" title=\"" + fmtUTC(e.timestamp) +
       "\">" + fmtLocal(e.timestamp) + "</span>";
     li.innerHTML =
-      "<div class=\"event-info\"><b>" + escHtml(e.camera_id) + "</b> " + timeHtml +
+      "<div class=\"event-info\"><b>" + escHtml(e.camera_name || cameraName(e.camera_id)) + "</b> " + timeHtml +
       "<div class=\"event-objs\">" + escHtml(countsSummary(e.counts)) + "</div>" +
       (e.has_metadata ? "" : "<div class=\"event-objs\">no metadata</div>") +
       "</div>" +
@@ -440,7 +468,7 @@
     img.src = e.image_url;
     $("modalSvg").style.display = $("bboxToggle").checked ? "" : "none";
     $("modalCaption").textContent =
-      e.camera_id + " · " + fmtLocal(e.timestamp) + " · " + countsSummary(e.counts);
+      (e.camera_name || cameraName(e.camera_id)) + " · " + fmtLocal(e.timestamp) + " · " + countsSummary(e.counts);
     $("modal").classList.remove("hidden");
   }
   function closeModal() {
@@ -456,36 +484,80 @@
     if (n >= 0 && n < state.events.length) openModal(n);
   }
 
+  function selectedCam() {
+    var i;
+    for (i = 0; i < state.cameras.length; i++) {
+      if (state.cameras[i].camera_id === state.selectedCamera) return state.cameras[i];
+    }
+    return null;
+  }
+  function clearLatest() {
+    var img = $("latestImg");
+    if (img) img.removeAttribute("src");
+    var o = $("latestOverlay");
+    if (o) o.innerHTML = "";
+    var ph = $("latestPaused");
+    if (ph) ph.classList.add("hidden"); var ld = $("latestLoading"); if (ld) { ld.textContent = "Loading latest frame…"; ld.classList.remove("hidden"); }
+    if (img) img.classList.add("hidden");
+  }
+  function showPausedLatest(cam) {
+    var img = $("latestImg");
+    if (img) { img.removeAttribute("src"); img.classList.add("hidden"); }
+    var o = $("latestOverlay");
+    if (o) o.innerHTML = "";
+    var txt = $("latestPausedText");
+    if (txt) txt.textContent = cam.name + " is paused - no live frame";
+    var ph = $("latestPaused");
+    if (ph) ph.classList.remove("hidden"); var ld = $("latestLoading"); if (ld) ld.classList.add("hidden");
+    $("latestMeta").textContent = cam.name + " is paused.";
+    $("latestDets").innerHTML = "";
+  }
   // ---- latest frame ----
   function loadLatest() {
-    if (!state.selectedCamera) return Promise.resolve();
+    var cam = selectedCam();
+    if (!state.selectedCamera) { clearLatest(); var ld = $("latestLoading"); if (ld) ld.textContent = "No camera selected"; $("latestMeta").textContent = ""; $("latestDets").innerHTML = ""; return Promise.resolve(); }
+    if (cam && cam.paused) { showPausedLatest(cam); return Promise.resolve(); }
     loadLatestDets();
     return api("/api/latest?camera=" + encodeURIComponent(state.selectedCamera))
       .then(function (r) {
-        $("latestImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
+        if (r.camera_id && r.camera_id !== state.selectedCamera) return;
+        var nowCam = selectedCam();
+        if (nowCam && nowCam.paused) { showPausedLatest(nowCam); return; }
+        var ld = $("latestLoading"); if (ld) ld.classList.add("hidden"); $("latestImg").classList.remove("hidden"); $("latestImg").src = "data:image/jpeg;base64," + r.jpeg_base64;
         $("latestMeta").textContent =
           fmtLocal(r.timestamp) + " · " + countsSummary(r.counts);
-      }).catch(function () { /* no frame yet */ });
+      }).catch(function () { clearLatest(); var ld = $("latestLoading"); if (ld) ld.textContent = "No frame available"; $("latestMeta").textContent = "No frame available"; $("latestDets").innerHTML = ""; });
   }
-  // Weak (sub-threshold) detections are a Latest Frame diagnostic only:
-  // text list, no bbox overlay. Confirmed entries render in normal text,
-  // weak entries are muted with a "(weak)" marker.
+  // Weak (sub-threshold) detections are a Latest Frame diagnostic only.
+  // Confirmed entries render in normal text, weak entries are muted with
+  // a "(weak)" marker, and both are drawn as bounding boxes over the
+  // latest frame (solid for confirmed, dashed and muted for weak).
   function loadLatestDets() {
-    if (!state.selectedCamera) return;
+    if (!state.selectedCamera) { var o = $("latestOverlay"); if (o) o.innerHTML = ""; return; }
+    var dc = selectedCam();
+    if (dc && dc.paused) { showPausedLatest(dc); return; }
     api("/api/latest_meta?camera=" + encodeURIComponent(state.selectedCamera))
       .then(renderLatestDets)
-      .catch(function () { /* no frame yet */ });
+      .catch(function () { var o = $("latestOverlay"); if (o) o.innerHTML = ""; });
   }
   function renderLatestDets(m) {
+    if (m.camera_id && m.camera_id !== state.selectedCamera) return;
+    var rc = selectedCam();
+    if (rc && rc.paused) { showPausedLatest(rc); return; }
     var el = $("latestDets");
+    var overlay = $("latestOverlay");
+    if (overlay) overlay.innerHTML = "";
     var items = [];
+    var boxes = [];
     Object.keys(m.detections || {}).forEach(function (cls) {
       (m.detections[cls] || []).forEach(function (d) {
         items.push({ label: cls + " " + d.confidence.toFixed(2), weak: false });
+        boxes.push({ label: cls + " " + d.confidence.toFixed(2), bbox: d.bbox, weak: false });
       });
     });
     (m.weak_detections || []).forEach(function (w) {
       items.push({ label: w.class + " " + w.confidence.toFixed(2) + " (weak)", weak: true });
+      boxes.push({ label: w.class + " " + w.confidence.toFixed(2) + " (weak)", bbox: w.bbox, weak: true });
     });
     el.innerHTML = "";
     if (!items.length) {
@@ -502,6 +574,22 @@
       el.appendChild(s);
       el.appendChild(document.createTextNode("  "));
     });
+    if (overlay) {
+      boxes.forEach(function (b) {
+        if (!b.bbox || b.bbox.length !== 4) return;
+        var box = document.createElement("div");
+        box.className = b.weak ? "latest-box weak" : "latest-box";
+        box.style.left = (b.bbox[0] * 100) + "%";
+        box.style.top = (b.bbox[1] * 100) + "%";
+        box.style.width = ((b.bbox[2] - b.bbox[0]) * 100) + "%";
+        box.style.height = ((b.bbox[3] - b.bbox[1]) * 100) + "%";
+        var lab = document.createElement("span");
+        lab.className = "latest-box-label";
+        lab.textContent = b.label;
+        box.appendChild(lab);
+        overlay.appendChild(box);
+      });
+    }
   }
 
 
@@ -1187,6 +1275,51 @@
   }
 
   // ---- Camera type registry ----
+  function usbField(name) {
+    return $("usbFields").querySelector('[name="' + name + '"]');
+  }
+
+  function usbSetFormats(pf, res, fps) {
+    var formats = state.usbFormats || [];
+    var pfSel = usbField("pixel_format");
+    pfSel.innerHTML = "";
+    formats.forEach(function (f) {
+      var o = document.createElement("option");
+      o.value = f.pixel_format; o.textContent = f.pixel_format;
+      pfSel.appendChild(o);
+    });
+    if (!formats.length) {
+      var o0 = document.createElement("option");
+      o0.value = pf; o0.textContent = pf; pfSel.appendChild(o0);
+    }
+    pfSel.value = pf;
+    var fmt = null;
+    formats.forEach(function (f) { if (f.pixel_format === pfSel.value) fmt = f; });
+    var resSel = usbField("resolution");
+    resSel.innerHTML = "";
+    var sizes = fmt ? fmt.sizes : [res];
+    sizes.forEach(function (s) {
+      var o = document.createElement("option");
+      o.value = s[0] + "x" + s[1]; o.textContent = s[0] + "x" + s[1];
+      resSel.appendChild(o);
+    });
+    var resVal = res[0] + "x" + res[1];
+    resSel.value = sizes.some(function (s) { return s[0] === res[0] && s[1] === res[1]; }) ? resVal : (sizes[0][0] + "x" + sizes[0][1]);
+    var fpsSel = usbField("fps");
+    fpsSel.innerHTML = "";
+    var fpsList = fmt ? fmt.fps : [fps];
+    fpsList.forEach(function (v) {
+      var o = document.createElement("option");
+      o.value = v; o.textContent = v; fpsSel.appendChild(o);
+    });
+    fpsSel.value = fpsList.indexOf(fps) !== -1 ? fps : fpsList[0];
+  }
+
+  function updateUsbToggles() {
+    usbField("exposure_time_absolute").disabled = usbField("auto_exposure").checked;
+    usbField("white_balance_temperature").disabled = usbField("white_balance_automatic").checked;
+  }
+
   // Contract for an entry (add a new camera type by adding one):
   //   label        name in the Add camera chooser
   //   fields       id of the type's .cam-type-fields block in index.html
@@ -1278,10 +1411,10 @@
             body: JSON.stringify(camRequestBody()),
           }).then(function (r) {
             return {
-              text: "OK — " + (r.resolution ? r.resolution.join("x") : "") +
+              text: "OK — " + r.width + "x" + r.height +
                 " · " + (r.grab_seconds != null ? r.grab_seconds.toFixed(2) + "s" : "") +
                 (r.camera ? " · " + r.camera : ""),
-              jpeg_base64: r.jpeg_base64,
+              jpeg_base64: r.thumbnail_base64,
             };
           });
         },
@@ -1398,6 +1531,144 @@
       },
       onOpen: function (cam) { loadPiPreview(cam.camera_id); },
       onClose: function () { state.piPreviewSeq++; }, // invalidate any in-flight preview poll
+    },
+    usb: {
+      label: "USB camera",
+      fields: "usbFields",
+      tabs: [
+        { id: "device", label: "Device", panel: "usbDevicePanel",
+          errorKeys: ["device", "resolution", "format", "fps", "frame rate", "usb"] },
+        { id: "capture", label: "Capture", panel: "usbCapturePanel",
+          errorKeys: ["rotate", "paused", "exposure", "white balance"] },
+      ],
+      addTitle: "ADD USB CAMERA",
+      editTitle: "EDIT USB CAMERA",
+      defaultIcon: "camera",
+      addUrl: "/api/cameras",
+      canDelete: true,
+      discover: function () {
+        return api("/api/cameras/usb/scan").then(function (r) {
+          return (r.devices || []).map(function (d) {
+            var added = d.camera_id != null;
+            return {
+              title: d.model || d.device_id,
+              detail: "USB \u00b7 " + (added ? "added as " + d.camera_name : d.device_id),
+              icon: "camera",
+              status: added ? "added" : (d.present ? "new" : "missing"),
+              actionLabel: "Add",
+              action: added ? null : function () {
+                closeCamAdd();
+                openCamModal("usb", "add", null, { name: d.model, device: d });
+              },
+            };
+          });
+        });
+      },
+      fill: function (cam, prefill) {
+        var dev = null;
+        if (cam && cam.usb) dev = cam.usb;
+        else if (prefill && prefill.device) dev = prefill.device;
+        state.usbDevice = dev || null;
+        state.usbFormats = (dev && dev.formats) || [];
+        if (cam && cam.usb && !state.usbFormats.length) {
+          state.usbFormats = [{ pixel_format: cam.usb.pixel_format, sizes: [cam.resolution], fps: [cam.usb.fps] }];
+        }
+        usbField("device_id").value = dev ? (dev.device_id || "") : "";
+        $("usbModel").textContent = dev ? (dev.model || dev.device_id || "\u2014") : "\u2014";
+        $("usbDeviceId").textContent = dev ? (dev.device_id || "\u2014") : "\u2014";
+        $("usbStatus").textContent = cam ? (cam.status || "\u2014") : "New device";
+        var pf = (cam && cam.usb && cam.usb.pixel_format) || "MJPG";
+        if (state.usbFormats.length && !state.usbFormats.some(function (f) { return f.pixel_format === pf; })) pf = state.usbFormats[0].pixel_format;
+        var res = (cam && cam.resolution) || [1280, 720];
+        if (!cam) {
+          var mj = null;
+          state.usbFormats.forEach(function (f) { if (f.pixel_format === "MJPG") mj = f; });
+          if (mj) {
+            pf = "MJPG";
+            var has720 = mj.sizes.some(function (s) { return s[0] === 1280 && s[1] === 720; });
+            if (has720) res = [1280, 720];
+            else if (mj.sizes.length) res = mj.sizes[0];
+          }
+        }
+        var fps = (cam && cam.usb && cam.usb.fps) || 15;
+        usbSetFormats(pf, res, fps);
+        usbField("rotate").value = cam && cam.rotate != null ? cam.rotate : 0;
+        usbField("start_paused").checked = !!(cam && cam.paused);
+        var ctrls = (cam && cam.usb_controls) || {};
+        usbField("auto_exposure").checked = ctrls.auto_exposure !== false;
+        usbField("exposure_time_absolute").value = ctrls.exposure_time_absolute != null ? ctrls.exposure_time_absolute : 166;
+        usbField("white_balance_automatic").checked = ctrls.white_balance_automatic !== false;
+        usbField("white_balance_temperature").value = ctrls.white_balance_temperature != null ? ctrls.white_balance_temperature : 4000;
+        updateUsbToggles();
+        if (!state.usbFormatListener) {
+          state.usbFormatListener = true;
+          usbField("pixel_format").addEventListener("change", function () {
+            var curRes = usbField("resolution").value.split("x");
+            var curFps = parseInt(usbField("fps").value, 10);
+            usbSetFormats(usbField("pixel_format").value, [parseInt(curRes[0], 10), parseInt(curRes[1], 10)], curFps);
+          });
+        }
+      },
+      collect: function () {
+        var resParts = usbField("resolution").value.split("x");
+        return {
+          type: "usb",
+          usb: {
+            device_id: usbField("device_id").value,
+            model: state.usbDevice ? (state.usbDevice.model || "") : "",
+            resolution: [parseInt(resParts[0], 10), parseInt(resParts[1], 10)],
+            pixel_format: usbField("pixel_format").value,
+            fps: parseInt(usbField("fps").value, 10),
+          },
+          usb_controls: {
+            auto_exposure: usbField("auto_exposure").checked,
+            exposure_time_absolute: usbField("auto_exposure").checked ? null : parseInt(usbField("exposure_time_absolute").value, 10),
+            white_balance_automatic: usbField("white_balance_automatic").checked,
+            white_balance_temperature: usbField("white_balance_automatic").checked ? null : parseInt(usbField("white_balance_temperature").value, 10),
+          },
+          rotate: parseInt(usbField("rotate").value, 10),
+          start_paused: usbField("start_paused").checked,
+        };
+      },
+      validate: function () {
+        var errs = [];
+        if (!usbField("device_id").value) errs.push({ field: "device_id", tab: "device", message: "USB device is required. Pick one from Add camera." });
+        if (!usbField("pixel_format").value) errs.push({ field: "pixel_format", tab: "device", message: "Pixel format is required." });
+        var res = usbField("resolution").value.split("x");
+        if (!(parseInt(res[0], 10) > 0 && parseInt(res[1], 10) > 0)) errs.push({ field: "resolution", tab: "device", message: "Resolution is invalid." });
+        var fps = parseInt(usbField("fps").value, 10);
+        if (!(fps > 0)) errs.push({ field: "fps", tab: "device", message: "Frame rate must be positive." });
+        if (!usbField("auto_exposure").checked) {
+          var exp = parseInt(usbField("exposure_time_absolute").value, 10);
+          if (!(exp >= 1 && exp <= 10000)) errs.push({ field: "exposure_time_absolute", tab: "capture", message: "Exposure must be 1\u201310000." });
+        }
+        if (!usbField("white_balance_automatic").checked) {
+          var wb = parseInt(usbField("white_balance_temperature").value, 10);
+          if (!(wb >= 0 && wb <= 10000)) errs.push({ field: "white_balance_temperature", tab: "capture", message: "White balance temperature must be 0\u201310000." });
+        }
+        return errs;
+      },
+      test: {
+        label: "\u21bb Test camera",
+        hint: "Grabs one frame with the selected format.",
+        busyText: "Testing\u2026",
+        failPrefix: "Test failed: ",
+        run: function () {
+          var body = camRequestBody();
+          if (state.editingCameraId) body.camera_id = state.editingCameraId;
+          return api("/api/cameras/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }).then(function (r) {
+            return {
+              text: "OK \u2014 " + r.width + "x" + r.height + " \u00b7 " + (r.grab_seconds != null ? r.grab_seconds.toFixed(2) + "s" : "") + (r.codec ? " \u00b7 " + r.codec : ""),
+              jpeg_base64: r.thumbnail_base64,
+            };
+          });
+        },
+      },
+      onInput: updateUsbToggles,
     },
   };
 
@@ -1527,17 +1798,50 @@
   }
 
   // ---- Service settings (system-wide only) ----
-  function openServiceSettings() {
+  function switchSvcPanel(name) {
+    document.querySelectorAll(".svc-nav-item").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.svcPanel === name);
+    });
+    ["storage", "model", "mqtt", "general"].forEach(function (k) {
+      var el = $("svcPanel" + k.charAt(0).toUpperCase() + k.slice(1));
+      if (el) el.classList.toggle("hidden", k !== name);
+    });
+  }
+
+  function openServiceSettings(panel) {
+    panel = panel || "general";
     $("svcError").textContent = "";
-    api("/api/status").then(function (s) {
+    $("mqttTestStatus").textContent = "";
+    $("mqttTestStatus").className = "mqtt-status";
+    $("webTestStatus").textContent = "";
+    $("webTestStatus").className = "mqtt-status";
+    var statusP = api("/api/status").then(function (s) {
       $("svcModel").value = s.model || "yolov8n";
+      state.svcWebPort = s.web_port || 8082;
+      $("svcWebPort").value = state.svcWebPort;
+      $("svcWebUrl").textContent = portalBase(state.svcWebPort) + "/";
       var capMb = Math.round((s.buffer.cap_bytes || 1073741824) / 1048576);
       $("svcBufferCap").value = capMb;
       state.svcBufferBytes = s.buffer.bytes || 0;
       updateSvcInUse();
+    });
+    var mqttP = api("/api/mqtt/settings").then(function (m) {
+      $("mqttEnabled").checked = !!m.enabled;
+      $("mqttHost").value = m.host || "";
+      $("mqttPort").value = m.port != null ? m.port : "";
+      $("mqttTls").checked = m.tls !== false;
+      $("mqttTopicRoot").value = m.topic_root || "";
+      $("mqttUsername").value = m.username || "";
+      $("mqttPassword").value = "";
+      $("mqttPassword").placeholder = m.has_password ? "\u2022\u2022\u2022\u2022\u2022\u2022 (unchanged)" : "";
+      updateMqttToggles();
+    });
+    Promise.all([statusP, mqttP]).then(function () {
+      switchSvcPanel(panel);
       $("settingsModal").classList.remove("hidden");
-    }).catch(function (e) {
-      $("svcError").textContent = "Could not load service status: " + e.message;
+    }, function (e) {
+      $("svcError").textContent = "Could not load service settings: " + e.message;
+      switchSvcPanel(panel);
       $("settingsModal").classList.remove("hidden");
     });
   }
@@ -1554,6 +1858,174 @@
     $("svcInUseFill").style.width = Math.min(100, (usedMb / cap) * 100) + "%";
   }
 
+  function mqttPanelFields() {
+    var portVal = $("mqttPort").value;
+    return {
+      enabled: $("mqttEnabled").checked,
+      host: $("mqttHost").value.trim(),
+      port: portVal === "" ? "" : parseInt(portVal, 10),
+      tls: $("mqttTls").checked,
+      topic_root: $("mqttTopicRoot").value.trim(),
+      username: $("mqttUsername").value,
+      password: $("mqttPassword").value,
+    };
+  }
+
+  function updateMqttToggles() {
+    var on = $("mqttEnabled").checked;
+    ["mqttHost", "mqttPort", "mqttTls", "mqttTopicRoot", "mqttUsername", "mqttPassword", "mqttTestBtn"].forEach(function (id) {
+      $(id).disabled = !on;
+    });
+    var sw = $("mqttSwitch");
+    if (sw) {
+      sw.setAttribute("aria-checked", on ? "true" : "false");
+      $("mqttSwitchText").textContent = on ? "Enabled" : "Disabled";
+    }
+    var fields = $("mqttFields"); if (fields) fields.classList.toggle("svc-dim", !on);
+    var foot = $("mqttFoot"); if (foot) foot.classList.toggle("svc-dim", !on);
+    var dot = $("svcMqttDot"); if (dot) dot.classList.toggle("hidden", !on);
+    updateMqttScheme();
+  }
+
+  function updateMqttScheme() {
+    var sc = $("mqttScheme");
+    if (sc) sc.textContent = $("mqttTls").checked ? "mqtts://" : "mqtt://";
+  }
+
+  // ---- Portal port move (General panel) ----
+  // A port save restarts the whole service, so every open tab must
+  // move to the new port. Cross-port polling works because
+  // /api/status sends Access-Control-Allow-Origin: * (LAN-only UI).
+  function portalBase(port) {
+    return window.location.protocol + "//" + window.location.hostname + ":" + port;
+  }
+
+  function showPortMoveNotice(html) {
+    var el = $("portMoveNotice");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "portMoveNotice";
+      el.className = "port-move-notice";
+      document.body.appendChild(el);
+    }
+    el.innerHTML = html;
+  }
+
+  function hidePortMoveNotice() {
+    var el = $("portMoveNotice");
+    if (el) el.remove();
+  }
+
+  function waitForPort(port, seconds) {
+    var url = portalBase(port) + "/api/status";
+    var deadline = Date.now() + seconds * 1000;
+    function attempt() {
+      return fetch(url, { cache: "no-store" }).then(function (r) {
+        if (!r.ok) return false;
+        return r.json().then(function (j) {
+          return j.service === "jaeger";
+        }, function () { return false; });
+      }, function () { return false; }).then(function (ok) {
+        if (ok) return true;
+        if (state.portMoveAborted) return false;
+        if (Date.now() >= deadline) return false;
+        return new Promise(function (res) { setTimeout(res, 500); }).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
+  function moveToPort(newPort, oldPort) {
+    if (state.portMoving) return;
+    state.portMoving = true;
+    state.portMoveAborted = false;
+    showPortMoveNotice("Jaeger is restarting on port " + newPort + "…");
+    waitForPort(newPort, 15).then(function (ok) {
+      if (ok) {
+        window.location.href = portalBase(newPort) + "/";
+        return;
+      }
+      if (state.portMoveAborted) {
+        showPortMoveNotice("Port became unavailable; kept the old port.");
+        state.portMoving = false;
+        setTimeout(function () {
+          window.location.href = portalBase(oldPort) + "/";
+        }, 1500);
+        return;
+      }
+      return waitForPort(oldPort, 5).then(function (oldOk) {
+        if (oldOk) {
+          showPortMoveNotice("Port became unavailable; kept the old port.");
+          state.portMoving = false;
+          setTimeout(function () {
+            window.location.href = portalBase(oldPort) + "/";
+          }, 1500);
+        } else {
+          state.portMoving = false;
+          showPortMoveNotice("The service did not come back — check the Pi log and restart manually: " + '<a href="' + portalBase(newPort) + '/">new port ' + newPort + '</a> or ' + '<a href="' + portalBase(oldPort) + '/">old port ' + oldPort + '</a>.')
+        }
+      });
+    });
+  }
+
+  function testWebPort() {
+    var portVal = $("svcWebPort").value;
+    var port = parseInt(portVal, 10);
+    if (!(port >= 1024 && port <= 65535) || String(port) !== String(portVal).trim()) {
+      $("webTestStatus").textContent = "Port must be 1024–65535.";
+      $("webTestStatus").className = "mqtt-status fail";
+      return Promise.resolve(false);
+    }
+    $("webTestBtn").disabled = true;
+    $("webTestStatus").textContent = "Checking…";
+    $("webTestStatus").className = "mqtt-status";
+    return api("/api/web/test-port", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: port }),
+    }).then(function (r) {
+      if (r.ok) {
+        $("webTestStatus").textContent = r.current ? "This is the current port." : "Port available.";
+        $("webTestStatus").className = "mqtt-status ok";
+        return true;
+      }
+      $("webTestStatus").textContent = r.error || "Port unavailable.";
+      $("webTestStatus").className = "mqtt-status fail";
+      return false;
+    }, function (e) {
+      $("webTestStatus").textContent = "Check failed: " + e.message;
+      $("webTestStatus").className = "mqtt-status fail";
+      return false;
+    }).then(function (ok) {
+      $("webTestBtn").disabled = false;
+      return ok;
+    });
+  }
+
+  function testMqttSettings() {
+    var fields = mqttPanelFields();
+    if (!fields.enabled) return Promise.resolve(true);
+    $("mqttTestBtn").disabled = true;
+    $("mqttTestStatus").textContent = "Testing\u2026";
+    $("mqttTestStatus").className = "mqtt-status";
+    return api("/api/mqtt/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }).then(function () {
+      $("mqttTestStatus").textContent = "Connection OK";
+      $("mqttTestStatus").className = "mqtt-status ok";
+      return true;
+    }, function (e) {
+      $("mqttTestStatus").textContent = "Connection failed: " + e.message;
+      $("mqttTestStatus").className = "mqtt-status fail";
+      return false;
+    }).then(function (ok) {
+      $("mqttTestBtn").disabled = !$("mqttEnabled").checked;
+      return ok;
+    });
+  }
+
   function submitServiceSettings(ev) {
     ev.preventDefault();
     var model = $("svcModel").value;
@@ -1566,16 +2038,53 @@
       $("svcError").textContent = "Image history limit must be at least 1 MB.";
       return;
     }
+    var webPortVal = $("svcWebPort").value;
+    var webPort = parseInt(webPortVal, 10);
+    if (!(webPort >= 1024 && webPort <= 65535) || String(webPort) !== String(webPortVal).trim()) {
+      $("svcError").textContent = "Portal port must be 1024–65535.";
+      switchSvcPanel("general");
+      return;
+    }
+    var mqtt = mqttPanelFields();
+    if (mqtt.enabled) {
+      if (!mqtt.host) {
+        $("svcError").textContent = "MQTT host is required when MQTT is enabled.";
+        switchSvcPanel("mqtt");
+        return;
+      }
+      if (mqtt.port !== "" && !(mqtt.port >= 1 && mqtt.port <= 65535)) {
+        $("svcError").textContent = "MQTT port must be 1\u201365535.";
+        switchSvcPanel("mqtt");
+        return;
+      }
+    }
     $("svcSaveBtn").disabled = true;
-    // Service-level path: the sentinel camera_id "service" routes to
-    // apply_service_config. Only model + buffer cap are sent — no
-    // per-camera keys, no per-camera id.
-    api("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ camera_id: "service", model: model, buffer_cap_mb: cap }),
-    }).then(function () {
+    $("svcError").textContent = "";
+    var doSave = function () {
+      return api("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera_id: "service", model: model, buffer_cap_mb: cap, mqtt: mqtt, web_port: webPort }),
+      });
+    };
+    var afterTest = mqtt.enabled ? testMqttSettings() : Promise.resolve(true);
+    afterTest.then(function (ok) {
+      if (!ok) {
+        $("svcError").textContent = "MQTT test failed; nothing was saved.";
+        switchSvcPanel("mqtt");
+        return null;
+      }
+      return doSave();
+    }).then(function (r) {
+      if (r === null) return;
       $("settingsModal").classList.add("hidden");
+      if (r.restarting) {
+        // Save response arrived before the restart: poll the new
+        // port (backup for the SSE restart broadcast, in case this
+        // tab's SSE stream is already closed).
+        moveToPort(r.new_port, state.svcWebPort || r.old_port);
+        return;
+      }
       loadStatus().then(updateDetModelNote);
       loadCameras();
     }).catch(function (e) {
@@ -1614,6 +2123,24 @@
       $("settingsModal").classList.add("hidden");
     });
     $("svcForm").addEventListener("submit", submitServiceSettings);
+    document.querySelectorAll(".svc-nav-item").forEach(function (b) {
+      b.addEventListener("click", function () { switchSvcPanel(b.dataset.svcPanel); });
+    });
+    $("mqttEnabled").addEventListener("change", updateMqttToggles);
+    $("mqttSwitch").addEventListener("click", function () {
+      var cb = $("mqttEnabled");
+      cb.checked = !cb.checked;
+      updateMqttToggles();
+    });
+    $("mqttTls").addEventListener("change", function () {
+      var tls = $("mqttTls").checked;
+      if ($("mqttPort").value === "") $("mqttPort").value = tls ? 8883 : 1883;
+      else if (tls && $("mqttPort").value === "1883") $("mqttPort").value = "8883";
+      else if (!tls && $("mqttPort").value === "8883") $("mqttPort").value = "1883";
+      updateMqttScheme();
+    });
+    $("mqttTestBtn").addEventListener("click", testMqttSettings);
+    $("webTestBtn").addEventListener("click", testWebPort);
     $("svcBufferCap").addEventListener("input", updateSvcInUse);
     $("zeroToggle").addEventListener("change", loadCounts);
     $("hideEmptyToggle").addEventListener("change", function () {
@@ -1635,6 +2162,9 @@
     $("clearClassFilter").addEventListener("click", clearClassFilter);
     $("refreshEventsBtn").addEventListener("click", function () {
       loadEvents(true);
+    });
+    $("mqttWarn").addEventListener("click", function () {
+      openServiceSettings("mqtt");
     });
     $("modalClose").addEventListener("click", closeModal);
     $("modalPrev").addEventListener("click", function () { modalStep(-1); });
@@ -1723,6 +2253,15 @@
     });
     loadEvents(true);
     startStream();
+    var latestResumeBtn = $("latestPausedResume");
+    if (latestResumeBtn) latestResumeBtn.addEventListener("click", function () {
+      if (!state.selectedCamera) return;
+      api("/api/cameras/" + encodeURIComponent(state.selectedCamera) + "/resume",
+        { method: "POST" }).then(function () {
+          loadCameras().then(function () { loadLatest(); });
+          loadStatus();
+        }).catch(function (err) { alert("Resume failed: " + err.message); });
+    });
     // Uptime tick only: re-renders from the last fetched status, no fetch.
     setInterval(renderStatusLine, 1000);
   }
@@ -1756,6 +2295,12 @@
         loadLatest();
         loadCameras();
         loadStatus(); // keep header (last inference, load) live
+      } else if (msg.type === "restart") {
+        // Another tab saved a new portal port: move this tab too.
+        // Closed tabs and bookmarks cannot be moved.
+        moveToPort(msg.new_port, parseInt(window.location.port, 10) || 8082);
+      } else if (msg.type === "restart_aborted") {
+        if (state.portMoving) state.portMoveAborted = true;
       } else if (msg.type === "config") {
         loadCameras();
         loadCounts();

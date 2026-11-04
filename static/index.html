@@ -25,7 +25,7 @@
     <section id="camerasSection">
       <h2>Cameras</h2>
       <div id="loadIndicator" class="load-indicator" title="Inference load = sum over cameras of (measured inference time / sample interval). Above 1.0 the inference worker cannot keep up; frames are superseded and per-camera effective intervals grow.">Inference load: —</div>
-      <ul id="cameraList"></ul>
+      <ul id="cameraList"></ul><div id="camerasLoading" class="counts-empty">Loading cameras…</div><div id="camerasError" class="counts-empty hidden">Could not load cameras.</div>
       <div id="noCamerasEmpty" class="empty-state hidden">
         No cameras configured. Use [+] to add a camera or look for
         the Pi camera.
@@ -43,7 +43,7 @@
 
     <section id="latestSection">
       <h2>Latest frame</h2>
-      <img id="latestImg" alt="Latest frame (none yet)">
+      <div class="latest-wrap"><img id="latestImg" alt="Latest frame (none yet)" class="hidden"><div id="latestLoading" class="latest-loading">Loading latest frame…</div><div id="latestOverlay" class="latest-overlay"></div><div id="latestPaused" class="latest-paused hidden"><span id="latestPausedText"></span><button type="button" id="latestPausedResume">Resume</button></div></div>
       <div id="latestMeta"></div>
       <div id="latestDets"></div>
     </section>
@@ -51,7 +51,13 @@
 
   <div id="rightCol">
     <section id="eventsSection">
-      <h2>Events</h2>
+      <div class="events-header-row">
+        <h2>Events</h2>
+        <button id="mqttWarn" class="mqtt-warn hidden" type="button" role="alert" title="Open MQTT settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8 L21.2 20.4 L2.8 19.6 Z" fill="#fbbf24" stroke="#92400e" stroke-width="1.6" stroke-linejoin="round"/><text x="12" y="18.5" text-anchor="middle" font-size="14" font-weight="800" fill="#78350f">!</text></svg>
+          <span id="mqttWarnText"></span>
+        </button>
+      </div>
       <div class="filters">
         <label>Camera
           <select id="cameraFilter"><option value="">All cameras</option></select>
@@ -268,6 +274,55 @@
           </div>
         </div>
 
+        <div id="usbFields" class="cam-type-fields">
+          <div id="usbDevicePanel" class="tab-panel">
+            <div class="cam-form-grid">
+              <fieldset class="cam-card"><legend>Device</legend>
+                <input type="hidden" name="device_id">
+                <div class="sensor-status"><span id="usbStatus">New device</span> · <span id="usbModel">—</span></div>
+                <label>Stable device id <span class="ro-field" id="usbDeviceId">—</span></label>
+                <p class="hint">The by-id name, not /dev/videoN, so the camera survives reboots and re-plugs.</p>
+              </fieldset>
+              <fieldset class="cam-card"><legend>Format</legend>
+                <div class="form-row">
+                  <label>Pixel format
+                    <select name="pixel_format"></select></label>
+                  <label>Resolution
+                    <select name="resolution"></select></label>
+                  <label>Frame rate
+                    <select name="fps"></select></label>
+                </div>
+                <p class="hint">MJPG is preferred at high resolution; YUYV can exceed USB 2 bandwidth.</p>
+              </fieldset>
+            </div>
+          </div>
+          <div id="usbCapturePanel" class="tab-panel hidden">
+            <div class="cam-form-grid">
+              <fieldset class="cam-card"><legend>Capture</legend>
+                <div class="form-row">
+                  <label>Rotate
+                    <select name="rotate">
+                      <option value="0">0°</option>
+                      <option value="90">90°</option>
+                      <option value="180">180°</option>
+                      <option value="270">270°</option>
+                    </select></label>
+                  <label class="fld-check"><input type="checkbox" name="start_paused"> Start paused</label>
+                </div>
+                <p class="hint">Persistent connection: the camera stays open between grabs.</p>
+              </fieldset>
+              <fieldset class="cam-card"><legend>Image</legend>
+                <label class="fld-inline"><input type="checkbox" name="auto_exposure" checked> Auto exposure</label>
+                <label>Exposure <span class="dim">absolute</span>
+                  <span class="suffix-input"><input type="number" name="exposure_time_absolute" value="166" min="1" max="10000"><span>1–10000</span></span></label>
+                <label class="fld-inline"><input type="checkbox" name="white_balance_automatic" checked> Auto white balance</label>
+                <label>White balance temperature
+                  <span class="suffix-input"><input type="number" name="white_balance_temperature" value="4000" min="0" max="10000" step="10"><span>K</span></span></label>
+              </fieldset>
+            </div>
+          </div>
+        </div>
+
         <div id="camDetPanel" class="tab-panel hidden"></div>
         <div id="camWatchPanel" class="tab-panel hidden"></div>
       </div>
@@ -295,29 +350,110 @@
 
 <div id="settingsModal" class="hidden cam-dialog" role="dialog" aria-modal="true">
   <div class="modal-box svc-modal-box">
-    <button id="settingsClose" aria-label="Close">×</button>
     <div class="svc-head">
-      <span class="svc-badge">Applies to all cameras</span>
-      <h2>Service settings</h2>
+      <div class="svc-head-left">
+        <span class="svc-badge"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>Applies to all cameras</span>
+        <h2>Service settings</h2>
+      </div>
+      <button id="settingsClose" aria-label="Close">×</button>
     </div>
     <form id="svcForm">
-      <div class="svc-body">
-        <section class="svc-card">
-          <label for="svcModel">Detection model</label>
-          <select id="svcModel"><option value="yolov8n">yolov8n (nano)</option><option value="yolov8s">yolov8s (small)</option></select>
-          <p class="hint">Larger models are more accurate but slower on a Pi 4. Every camera uses this model.</p>
-        </section>
-        <section class="svc-card">
-          <div class="svc-limit-row">
-            <label>Image history limit
-              <span class="suffix-input"><input type="number" id="svcBufferCap" value="1024" min="1"><span>MB</span></span></label>
-            <div class="svc-inuse">
-              <div class="svc-inuse-top"><span>In use</span><span id="svcInUseLabel" class="mono">—</span></div>
-              <div class="svc-bar"><div id="svcInUseFill"></div></div>
+      <div class="svc-layout">
+        <nav class="svc-nav" aria-label="Service settings sections">
+          <button type="button" class="svc-nav-item active" data-svc-panel="general">General</button>
+          <button type="button" class="svc-nav-item" data-svc-panel="storage">Storage limit</button>
+          <button type="button" class="svc-nav-item" data-svc-panel="model">Detection model</button>
+          <button type="button" class="svc-nav-item" data-svc-panel="mqtt">MQTT<span id="svcMqttDot" class="svc-nav-dot hidden" aria-label="MQTT enabled"></span></button>
+        </nav>
+        <div class="svc-panels">
+          <section id="svcPanelStorage" class="svc-panel hidden">
+            <div class="svc-card">
+              <p class="svc-card-head">Storage limit</p>
+              <div class="svc-limit-row">
+                <label>Image history limit
+                  <span class="suffix-input"><input type="number" id="svcBufferCap" value="1024" min="1"><span>MB</span></span></label>
+                <div class="svc-inuse">
+                  <div class="svc-inuse-top"><span>In use</span><span id="svcInUseLabel" class="mono">—</span></div>
+                  <div class="svc-bar"><div id="svcInUseFill"></div></div>
+                </div>
+              </div>
+              <p class="hint">Disk space shared by all cameras' captured images. The oldest are removed when the limit is reached.</p>
             </div>
-          </div>
-          <p class="hint">Disk space shared by all cameras' captured images. The oldest are removed when the limit is reached.</p>
-        </section>
+          </section>
+          <section id="svcPanelModel" class="svc-panel hidden">
+            <div class="svc-card">
+              <p class="svc-card-head">Detection model</p>
+              <div class="svc-model-field">
+                <label for="svcModel">Model</label>
+                <select id="svcModel"><option value="yolov8n">yolov8n (nano)</option><option value="yolov8s">yolov8s (small)</option></select>
+              </div>
+              <p class="hint">Larger models are more accurate but slower on a Pi 4. Every camera uses this model.</p>
+            </div>
+          </section>
+          <section id="svcPanelMqtt" class="svc-panel hidden">
+            <div class="svc-card svc-mqtt-card">
+              <div class="svc-mqtt-head">
+                <div class="svc-mqtt-head-left">
+                  <p class="svc-card-head">MQTT reporting</p>
+                  <p class="svc-mqtt-sub">When off, the service runs without MQTT. Cameras, detection, images and the web UI keep working.</p>
+                </div>
+                <input type="checkbox" id="mqttEnabled" class="visually-hidden">
+                <button type="button" id="mqttSwitch" class="svc-switch" role="switch" aria-checked="false" aria-label="Enable MQTT"><span id="mqttSwitchText">Disabled</span><span class="svc-switch-track"><span class="svc-switch-knob"></span></span></button>
+              </div>
+              <div id="mqttFields" class="svc-mqtt-fields">
+                <div class="svc-mqtt-row1">
+                  <div class="mqtt-host-field">
+                    <label for="mqttHost">Broker host</label>
+                    <div class="mqtt-host-box"><span id="mqttScheme" class="mqtt-scheme">mqtts://</span><input type="text" id="mqttHost" placeholder="broker.example.com" autocomplete="off"></div>
+                  </div>
+                  <div class="mqtt-port-field">
+                    <label for="mqttPort">Port</label>
+                    <input type="number" id="mqttPort" min="1" max="65535">
+                  </div>
+                  <label class="mqtt-tls-label"><input type="checkbox" id="mqttTls" checked> Use TLS</label>
+                </div>
+                <div class="svc-mqtt-grid">
+                  <div class="mqtt-grid-field">
+                    <label for="mqttTopicRoot">Topic root</label>
+                    <input type="text" id="mqttTopicRoot" class="mono" placeholder="Wovyn/RaspberryPi/Jaeger" autocomplete="off">
+                  </div>
+                  <div class="mqtt-grid-field">
+                    <label for="mqttUsername">Username</label>
+                    <input type="text" id="mqttUsername" autocomplete="off">
+                  </div>
+                  <div class="mqtt-grid-field">
+                    <label for="mqttPassword">Password</label>
+                    <input type="password" id="mqttPassword" autocomplete="off">
+                  </div>
+                </div>
+                <div class="svc-mqtt-notes">
+                  <span>Retained topics under an old root are not cleared automatically.</span>
+                  <span>Leave password blank to keep the stored one. It is never shown back.</span>
+                </div>
+              </div>
+              <div id="mqttFoot" class="svc-mqtt-foot">
+                <button type="button" id="mqttTestBtn" class="mqtt-test-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12a7 7 0 0112-5l2 2M19 12a7 7 0 01-12 5l-2-2M19 4v5h-5M5 20v-5h5"/></svg>Test connection</button>
+                <span id="mqttTestStatus" class="mqtt-status"></span>
+                <span class="svc-mqtt-save-note">Saving runs a connection test first. If it fails, nothing is saved.</span>
+              </div>
+            </div>
+          </section>
+          <section id="svcPanelGeneral" class="svc-panel">
+            <div class="svc-card">
+              <p class="svc-card-head">General</p>
+              <div class="form-row">
+                <label class="fld-port">Portal Port
+                  <input type="number" id="svcWebPort" min="1024" max="65535"></label>
+              </div>
+              <p class="svc-url-line">Current portal: <span id="svcWebUrl" class="mono">—</span></p>
+              <div class="svc-test-row">
+                <button type="button" id="webTestBtn">Check availability</button>
+                <span id="webTestStatus" class="mqtt-status"></span>
+              </div>
+              <p class="hint">Saving a different port restarts the service on the new port and open browsers are moved automatically. A bookmark to the old port will not follow — update it after the move. Tabs that are closed cannot be moved.</p>
+            </div>
+          </section>
+        </div>
       </div>
       <div id="svcError" class="error"></div>
       <div class="form-actions svc-actions">
@@ -333,6 +469,7 @@
     <img src="/static/logo.png" class="about-logo" alt="Jaeger logo">
     <button id="aboutClose" aria-label="Close">×</button>
     <h2>About Jaeger</h2>
+    <p class="about-version">Version <span id="aboutVersion"></span></p>
     <p>Jaeger is an experimental project built with Meta Muse and the
     Muse Gadgets SDK. It was created as a much smaller version of the
     Frigate Open Source Project.</p>

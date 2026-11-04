@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=musecell
 WorkingDirectory=/home/musecell/projects/jaeger
-ExecStart=/home/musecell/projects/jaeger/venv/bin/python yolo_sensor.py
+ExecStart=/home/musecell/projects/jaeger/venv/bin/python -u yolo_sensor.py
 Restart=on-failure
 RestartSec=10
 

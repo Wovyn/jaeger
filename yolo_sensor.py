@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jaeger service v0.3.0.
+"""Jaeger service v0.4.0.
 
 Captures frames from configured cameras, runs YOLOv8 object detection, and
 publishes per-class counts/details to MQTT only when the scene changes.
@@ -25,6 +25,7 @@ import queue
 import re
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -40,7 +41,7 @@ try:
 except ImportError:  # web UI optional; the sensor must keep running
     JaegerWebServer = None
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "config.json")
 EVENT_REGISTRY_MAX = 200
@@ -63,10 +64,178 @@ DISAPPEAR_CONFIRM_MAX = 20
 # are a Latest Frame diagnostic only: never stored, never published.
 DISPLAY_FLOOR = 0.25
 
+# v0.4.0 MQTT helpers and default config (inserted after DISPLAY_FLOOR).
+DEFAULT_TOPIC_ROOT = 'Wovyn/RaspberryPi/Jaeger'
+
+
+def default_mqtt_block():
+    return {'enabled': False, 'host': '', 'port': 8883, 'tls': True,
+            'topic_root': DEFAULT_TOPIC_ROOT, 'username': '', 'password': ''}
+
+
+def default_config():
+    return {'buffer': {'cap_bytes': 1073741824, 'dir': 'buffer',
+                       'jpeg_quality': 85, 'max_files': 5000},
+            'cameras': [], 'model': 'yolov8n',
+            'mqtt': default_mqtt_block(), 'next_camera_id': 0,
+            'web': {'enabled': True, 'host': '0.0.0.0', 'port': 8082}}
+
+
+def mqtt_is_configured(config):
+    m = config.get('mqtt') if isinstance(config, dict) else None
+    if not isinstance(m, dict):
+        return False
+    if 'enabled' not in m:
+        return bool(str(m.get('host') or '').strip())
+    return bool(m.get('enabled')) and bool(str(m.get('host') or '').strip())
+
+
+def mqtt_settings_payload(config):
+    m = config.get('mqtt') if isinstance(config, dict) else None
+    if not isinstance(m, dict):
+        m = {}
+    return {'enabled': mqtt_is_configured(config),
+            'host': str(m.get('host') or ''),
+            'port': m.get('port', 8883),
+            'tls': bool(m.get('tls', True)),
+            'topic_root': str(m.get('topic_root') or DEFAULT_TOPIC_ROOT),
+            'username': str(m.get('username') or ''),
+            'has_password': bool(m.get('password'))}
+
+
+def normalize_mqtt_block(block, stored=None):
+    if not isinstance(block, dict):
+        raise ValueError('mqtt settings must be a JSON object')
+    stored = stored if isinstance(stored, dict) else {}
+    enabled = bool(block.get('enabled', stored.get('enabled', False)))
+    host = str(block.get('host', stored.get('host', '')) or '').strip()
+    tls = bool(block.get('tls', stored.get('tls', True)))
+    raw_port = block.get('port', stored.get('port', None))
+    if raw_port in ('', None):
+        port = 8883 if tls else 1883
+    else:
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            raise ValueError('mqtt port must be an integer')
+        if not 1 <= port <= 65535:
+            raise ValueError('mqtt port must be 1-65535')
+    topic_root = str(block.get('topic_root', stored.get('topic_root', '')) or '').strip()
+    if not topic_root:
+        topic_root = DEFAULT_TOPIC_ROOT
+    username = str(block.get('username', stored.get('username', '')) or '')
+    pw = block.get('password', None)
+    if pw is None or pw == '':
+        password = str(stored.get('password') or '')
+    else:
+        password = str(pw)
+    if enabled and not host:
+        raise ValueError('mqtt host is required when MQTT is enabled')
+    return {'enabled': enabled, 'host': host, 'port': port, 'tls': tls,
+            'topic_root': topic_root, 'username': username,
+            'password': password}
+
+
+def test_mqtt_connection(fields, stored=None, timeout=10.0):
+    # Temporary client only: never touches the live client, never saves.
+    # Error messages are generic on purpose: they never echo host,
+    # port, username or any credential.
+    m = normalize_mqtt_block(fields, stored=stored)
+    if not m['host']:
+        raise ValueError('mqtt host is required')
+    done = threading.Event()
+    holder = {}
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         client_id='jaeger-mqtt-test')
+    def _on_connect(c, u, f, rc, props):
+        try:
+            holder['rc'] = int(getattr(rc, 'value', rc))
+        except Exception:
+            holder['rc'] = -1
+        done.set()
+    client.on_connect = _on_connect
+    try:
+        if m['tls']:
+            client.tls_set()
+        if m['username'] or m['password']:
+            client.username_pw_set(m['username'], m['password'])
+        client.connect(m['host'], m['port'], keepalive=60)
+    except Exception as e:
+        try:
+            client.loop_stop()
+        except Exception:
+            pass
+        if isinstance(e, ConnectionRefusedError):
+            raise ValueError('mqtt connection refused by broker')
+        if isinstance(e, (socket.timeout, TimeoutError)):
+            raise ValueError('mqtt connection timed out')
+        if isinstance(e, socket.gaierror):
+            raise ValueError('mqtt could not resolve broker host')
+        raise ValueError('mqtt connection failed')
+    client.loop_start()
+    try:
+        if not done.wait(timeout=timeout):
+            raise ValueError('mqtt connection timed out')
+        rc = holder.get('rc', -1)
+        if rc == 0:
+            return {'ok': True}
+        if rc == 5:
+            raise ValueError('mqtt broker rejected credentials')
+        raise ValueError('mqtt broker refused connection')
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        try:
+            client.loop_stop()
+        except Exception:
+            pass
+
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+# ---- portal (web UI) port helpers (v0.4.0 General panel) ----
+WEB_PORT_MIN = 1024
+WEB_PORT_MAX = 65535
+DEFAULT_WEB_HOST = "0.0.0.0"
+DEFAULT_WEB_PORT = 8082
+
+
+def validate_web_port(value):
+    """Portal port: integer 1024-65535. musecell cannot bind <1024."""
+    if isinstance(value, bool):
+        raise ValueError("portal port must be an integer 1024-65535")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("portal port must be an integer 1024-65535")
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("portal port must be an integer 1024-65535")
+    if not WEB_PORT_MIN <= port <= WEB_PORT_MAX:
+        raise ValueError("portal port must be 1024-65535")
+    return port
+
+
+def web_port_available(host, port):
+    """Authoritative bind test on the configured host: bind, close at
+    once. True when nothing is listening there right now."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Mirror the real server (allow_reuse_address): a port in TIME_WAIT
+    # after a just-closed listener must NOT read as "in use" (moving
+    # straight back to the previous port failed on this, Oct 26),
+    # while an actively listening socket still blocks the bind.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
 
 def utcnow_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -179,6 +348,9 @@ def default_camera_cfg(cam_id, cam_type, name):
            "heartbeat_interval": 600, "camera_controls": {}}
     if cam_type == "rtsp":
         cfg["rtsp"] = default_rtsp_block()
+    if cam_type == 'usb':
+        cfg['usb'] = default_usb_block()
+        cfg['usb_controls'] = default_usb_controls()
     return cfg
 
 
@@ -730,9 +902,350 @@ class RTSPCamera(Camera):
                 pass
 
 
+# v0.4.0 USB device helpers (inserted before CAMERA_TYPES).
+import glob as _glob
+import re as _re
+
+
+def _usb_id_maps():
+    by_id = {}
+    by_path = {}
+    for d, out in (('/dev/v4l/by-id', by_id), ('/dev/v4l/by-path', by_path)):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(d, name)
+            try:
+                out[name] = os.path.realpath(p)
+            except OSError:
+                pass
+    return by_id, by_path
+
+
+def resolve_usb_node(device_id):
+    if not device_id:
+        return None
+    device_id = str(device_id)
+    if '/' in device_id:
+        return device_id if os.path.exists(device_id) else None
+    by_id, by_path = _usb_id_maps()
+    if device_id in by_id:
+        return by_id[device_id]
+    if device_id in by_path:
+        return by_path[device_id]
+    return None
+
+
+def usb_device_formats(node):
+    try:
+        proc = subprocess.run(['v4l2-ctl', '-d', node, '--list-formats-ext'],
+                              timeout=10, capture_output=True, text=True)
+        out = proc.stdout or ''
+    except Exception:
+        return []
+    formats = []
+    cur = None
+    for line in out.splitlines():
+        m = _re.search(r"\[\d+\]: '([A-Za-z0-9]+)'", line)
+        if m:
+            cur = {'pixel_format': m.group(1), 'sizes': [], 'fps': []}
+            formats.append(cur)
+            continue
+        m = _re.search(r'Size: Discrete (\d+)x(\d+)', line)
+        if m and cur is not None:
+            size = [int(m.group(1)), int(m.group(2))]
+            if size not in cur['sizes']:
+                cur['sizes'].append(size)
+            continue
+        m = _re.search(r'\(([0-9.]+) fps\)', line)
+        if m and cur is not None:
+            fps = int(round(float(m.group(1))))
+            if fps > 0 and fps not in cur['fps']:
+                cur['fps'].append(fps)
+    for f in formats:
+        f['sizes'] = sorted(f['sizes'], key=lambda s: s[0] * s[1], reverse=True)
+        f['fps'] = sorted(f['fps'], reverse=True)
+    return formats
+
+
+def default_usb_block():
+    return {'device_id': '', 'model': '', 'pixel_format': 'MJPG', 'fps': 15}
+
+
+def default_usb_controls():
+    return {'auto_exposure': True, 'exposure_time_absolute': None,
+            'white_balance_automatic': True,
+            'white_balance_temperature': None}
+
+
+def apply_usb_controls(node, controls):
+    if not isinstance(controls, dict) or not node:
+        return
+    def _set(ctrl, value):
+        try:
+            subprocess.run(['v4l2-ctl', '-d', node, '--set-ctrl',
+                            ctrl + '=' + str(value)],
+                           timeout=5, capture_output=True)
+        except Exception as e:
+            print('usb controls failed for device (' + str(e) + ')', flush=True)
+    if controls.get('auto_exposure', True):
+        _set('auto_exposure', 3)
+    else:
+        _set('auto_exposure', 1)
+        if controls.get('exposure_time_absolute') is not None:
+            _set('exposure_time_absolute', controls['exposure_time_absolute'])
+    if controls.get('white_balance_automatic', True):
+        _set('white_balance_automatic', 1)
+    else:
+        _set('white_balance_automatic', 0)
+        if controls.get('white_balance_temperature') is not None:
+            _set('white_balance_temperature',
+                 controls['white_balance_temperature'])
+
+
+def normalize_usb_form(body):
+    if not isinstance(body, dict):
+        raise ValueError('usb camera form must be a JSON object')
+    name = str(body.get('name', '')).strip()
+    if not name:
+        raise ValueError('name is required')
+    icon = str(body.get('icon', 'camera'))
+    if icon not in ICON_KEYS:
+        icon = 'camera'
+    try:
+        sample_interval = float(body.get('sample_interval', 5.0))
+    except (TypeError, ValueError):
+        raise ValueError('sample_interval must be a number')
+    if sample_interval < 0.5:
+        raise ValueError('sample_interval must be >= 0.5s')
+    try:
+        rotate = int(body.get('rotate', 0))
+    except (TypeError, ValueError):
+        raise ValueError('rotate must be 0/90/180/270')
+    if rotate not in (0, 90, 180, 270):
+        raise ValueError('rotate must be 0/90/180/270')
+    src = body.get('usb') if isinstance(body.get('usb'), dict) else body
+    device_id = str(src.get('device_id', '') or '').strip()
+    if not device_id:
+        raise ValueError('usb device is required')
+    pixel_format = str(src.get('pixel_format', 'MJPG') or 'MJPG')
+    if len(pixel_format) != 4:
+        raise ValueError('usb format is invalid')
+    res = src.get('resolution', [1280, 720])
+    try:
+        resolution = [int(res[0]), int(res[1])]
+    except Exception:
+        raise ValueError('usb resolution is invalid')
+    if resolution[0] <= 0 or resolution[1] <= 0:
+        raise ValueError('usb resolution is invalid')
+    try:
+        fps = int(src.get('fps', 15))
+    except (TypeError, ValueError):
+        raise ValueError('usb fps must be an integer')
+    if fps <= 0:
+        raise ValueError('usb fps is invalid')
+    usb = {'device_id': device_id,
+           'model': str(src.get('model', '') or ''),
+           'pixel_format': pixel_format, 'fps': fps}
+    ctrls_src = body.get('usb_controls') if isinstance(body.get('usb_controls'), dict) else {}
+    auto_exp = bool(ctrls_src.get('auto_exposure', True))
+    exp_val = None
+    if not auto_exp:
+        try:
+            exp_val = int(ctrls_src.get('exposure_time_absolute'))
+        except (TypeError, ValueError):
+            raise ValueError('usb exposure must be 1-10000')
+        if not 1 <= exp_val <= 10000:
+            raise ValueError('usb exposure must be 1-10000')
+    auto_wb = bool(ctrls_src.get('white_balance_automatic', True))
+    wb_val = None
+    if not auto_wb:
+        try:
+            wb_val = int(ctrls_src.get('white_balance_temperature'))
+        except (TypeError, ValueError):
+            raise ValueError('usb white balance temperature must be 0-10000')
+        if not 0 <= wb_val <= 10000:
+            raise ValueError('usb white balance temperature must be 0-10000')
+    controls = {'auto_exposure': auto_exp,
+                'exposure_time_absolute': exp_val,
+                'white_balance_automatic': auto_wb,
+                'white_balance_temperature': wb_val}
+    node = resolve_usb_node(device_id)
+    if node is not None:
+        formats = usb_device_formats(node)
+        match = None
+        for f in formats:
+            if f['pixel_format'] == pixel_format:
+                match = f
+                break
+        if formats and match is None:
+            raise ValueError('usb format is not supported by this device')
+        if match is not None and resolution not in match['sizes']:
+            raise ValueError('usb resolution is not supported by this device')
+        if match is not None and match['fps'] and fps not in match['fps']:
+            raise ValueError('usb fps is not supported by this device')
+    fields = {'name': name, 'icon': icon,
+              'sample_interval': sample_interval, 'rotate': rotate,
+              'paused': bool(body.get('start_paused', body.get('paused', False)))}
+    return fields, usb, controls, resolution
+
+# v0.4.0 USB camera backend: persistent V4L2 capture, lazy open.
+class USBCamera(Camera):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        usb = dict(default_usb_block())
+        usb.update(cfg.get('usb', {}) or {})
+        self.usb = usb
+        controls = dict(default_usb_controls())
+        controls.update(cfg.get('usb_controls', {}) or {})
+        self.usb_controls = controls
+        self._cap = None
+        self._lock = threading.Lock()
+        self.last_grab_info = {}
+        self.fail_streak = 0
+
+    @property
+    def access_method(self):
+        return 'usb'
+
+    def _open(self):
+        node = resolve_usb_node(self.usb.get('device_id', ''))
+        if node is None:
+            return None, 0.0
+        t0 = time.time()
+        apply_usb_controls(node, self.usb_controls)
+        cap = cv2.VideoCapture(node, cv2.CAP_V4L2)
+        try:
+            pf = self.usb.get('pixel_format', 'MJPG')
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pf))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.width))
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.height))
+            cap.set(cv2.CAP_PROP_FPS, int(self.usb.get('fps', 15)))
+        except Exception:
+            pass
+        if not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return None, round(time.time() - t0, 2)
+        return cap, round(time.time() - t0, 2)
+
+    def capture(self):
+        with self._lock:
+            open_s = 0.0
+            if self._cap is None:
+                self._cap, open_s = self._open()
+                if self._cap is None:
+                    return None
+            try:
+                ok, frame = self._cap.read()
+            except Exception:
+                ok, frame = False, None
+            if not ok or frame is None or not frame.size:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+                return None
+            try:
+                h, w = frame.shape[:2]
+                self.width, self.height = int(w), int(h)
+            except Exception:
+                pass
+            self.last_grab_info = {'source': 'usb', 'seconds': 0.0,
+                                   'open_seconds': open_s,
+                                   'wait_seconds': None}
+            self.fail_streak = 0
+            return frame, time.time()
+
+    def close(self):
+        with self._lock:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+
+    @staticmethod
+    def test_usb(usb, timeout_s=10):
+        node = resolve_usb_node(usb.get('device_id', ''))
+        if node is None:
+            raise RTSPTestError('usb device not found')
+        t0 = time.time()
+        cap = cv2.VideoCapture(node, cv2.CAP_V4L2)
+        try:
+            pf = usb.get('pixel_format', 'MJPG')
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pf))
+            res = usb.get('resolution', [1280, 720])
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(res[0]))
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(res[1]))
+            cap.set(cv2.CAP_PROP_FPS, int(usb.get('fps', 15)))
+            if not cap.isOpened():
+                raise RTSPTestError('usb device is busy or could not be opened')
+            deadline = time.time() + max(1, timeout_s)
+            frame = None
+            while time.time() < deadline:
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    break
+                frame = None
+                time.sleep(0.05)
+            if frame is None:
+                raise RTSPTestError('usb test timed out waiting for a frame')
+            h, w = frame.shape[:2]
+            return (frame, int(w), int(h), pf,
+                    round(time.time() - t0, 2), usb.get('device_id', ''))
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
+def scan_usb_present():
+    by_id, by_path = _usb_id_maps()
+    node_to_id = {}
+    for name, node in by_id.items():
+        if name.endswith('-video-index0'):
+            node_to_id[node] = name
+    for name, node in by_path.items():
+        if name.endswith('-video-index0') and node not in node_to_id:
+            node_to_id[node] = name
+    devices = []
+    for node in sorted(_glob.glob('/sys/class/video4linux/video*')):
+        base = os.path.basename(node)
+        if not base.startswith('video') or not base[5:].isdigit():
+            continue
+        try:
+            driver = os.path.basename(os.readlink(os.path.join(node, 'device', 'driver')))
+        except OSError:
+            continue
+        if driver != 'uvcvideo':
+            continue
+        dev_node = '/dev/' + base
+        if dev_node not in node_to_id:
+            continue
+        try:
+            with open(os.path.join(node, 'name')) as f:
+                model = f.read().strip()
+        except OSError:
+            model = 'USB camera'
+        devices.append({'device_id': node_to_id[dev_node],
+                        'model': model, 'present': True,
+                        'node': dev_node,
+                        'formats': usb_device_formats(dev_node)})
+    return devices
+
+
 CAMERA_TYPES = {
     "picamera": PiCamera,
     "rtsp": RTSPCamera,
+    "usb": USBCamera,
 }
 
 # --------------------------------------------------------------------------
@@ -752,7 +1265,13 @@ def migrate_config(config):
     Never touches credentials; never logs them.
     """
     changes = []
-    mqtt_cfg = config.setdefault("mqtt", {})
+    if not isinstance(config.get('mqtt'), dict):
+        config['mqtt'] = default_mqtt_block()
+        changes.append('mqtt block added (disabled)')
+    mqtt_cfg = config.setdefault('mqtt', {})
+    if not str(mqtt_cfg.get('topic_root') or '').strip():
+        mqtt_cfg['topic_root'] = DEFAULT_TOPIC_ROOT
+        changes.append('mqtt topic_root defaulted')
     root = mqtt_cfg.get("topic_root", "")
     if root.endswith("YOLOSensor"):
         mqtt_cfg["topic_root"] = root[:-len("YOLOSensor")] + "Jaeger"
@@ -818,8 +1337,14 @@ def migrate_config(config):
 class YoloSensor:
     def __init__(self, config):
         self.config = config
+        if 'buffer' not in self.config or not isinstance(self.config['buffer'], dict):
+            self.config['buffer'] = {'cap_bytes': 1073741824, 'dir': 'buffer', 'jpeg_quality': 85, 'max_files': 5000}
         self.serial = read_cpu_serial()
-        self.root = config["mqtt"]["topic_root"].rstrip("/")
+        self.mqtt_configured = mqtt_is_configured(self.config)
+        _m = self.config.get('mqtt') if isinstance(self.config.get('mqtt'), dict) else {}
+        self.root = str(_m.get('topic_root') or DEFAULT_TOPIC_ROOT).rstrip('/')
+        self.mqtt_configured = mqtt_is_configured(self.config)
+        self.mqtt_thread = None
         self.msg_queue = queue.Queue()
         self.stop_flag = False
         self.cameras = []
@@ -833,6 +1358,8 @@ class YoloSensor:
         self.last_cycle_at = None
         self.web_server = None
         self.web_port = None
+        self.restart_requested = None
+        self.restart_exec = False
         self.config_path = CONFIG_PATH
         # Shared model (service-level, owned by the inference worker).
         self.model_name = config.get("model", "yolov8n")
@@ -858,6 +1385,8 @@ class YoloSensor:
                         + list(parts))
 
     def publish(self, topic, payload, retain=False, raw=False):
+        if not getattr(self, 'mqtt_configured', False):
+            return
         if self.client is None:
             return
         body = payload if raw else json.dumps(payload)
@@ -868,28 +1397,75 @@ class YoloSensor:
 
     # ---- MQTT ----
     def mqtt_connect(self):
-        m = self.config["mqtt"]
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                  client_id=f"muse-yolo-{self.serial}")
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
-        self.client.on_disconnect = self.on_disconnect
-        self.client.will_set(
-            self.t_pi("status"),
-            json.dumps({"status": "offline", "timestamp": utcnow_iso()}),
-            qos=1, retain=True)
-        if m.get("tls", True):
-            self.client.tls_set()
-        self.client.username_pw_set(m["username"], m["password"])
-        self.client.reconnect_delay_set(min_delay=1, max_delay=60)
+        # Background worker: retries forever until stopped, so a down
+        # broker never blocks cameras, inference or the web UI.
+        if not self.mqtt_configured:
+            return
+        m = self.config['mqtt']
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                             client_id='muse-yolo-' + self.serial)
+        client.on_connect = self.on_connect
+        client.on_message = self.on_message
+        client.on_disconnect = self.on_disconnect
+        client.will_set(self.t_pi('status'),
+                        json.dumps({'status': 'offline',
+                                    'timestamp': utcnow_iso()}),
+                        qos=1, retain=True)
+        if m.get('tls', True):
+            client.tls_set()
+        if m.get('username') or m.get('password'):
+            client.username_pw_set(m.get('username', ''), m.get('password', ''))
+        client.reconnect_delay_set(min_delay=1, max_delay=60)
+        self.client = client
         while not self.stop_flag:
             try:
-                self.client.connect(m["host"], m.get("port", 8883), keepalive=60)
+                client.connect(m['host'], m.get('port', 8883), keepalive=60)
                 break
-            except Exception as e:
-                print(f"MQTT connect failed ({e}); retrying in 5s", flush=True)
+            except Exception:
+                print('MQTT connect failed; retrying in 5s', flush=True)
                 time.sleep(5)
-        self.client.loop_start()
+        if self.stop_flag:
+            return
+        client.loop_start()
+
+    def start_mqtt_background(self):
+        if not self.mqtt_configured:
+            print('MQTT not configured; running without MQTT reporting',
+                  flush=True)
+            return
+        t = getattr(self, 'mqtt_thread', None)
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=self.mqtt_connect, daemon=True,
+                             name='mqtt-connect')
+        self.mqtt_thread = t
+        t.start()
+
+    def mqtt_disconnect(self):
+        client = self.client
+        self.client = None
+        self.mqtt_connected = False
+        if client is not None:
+            try:
+                client.loop_stop()
+            except Exception:
+                pass
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
+    def mqtt_test(self, fields):
+        if isinstance(fields, dict) and fields.get('enabled') is False:
+            raise ValueError('mqtt is disabled')
+        stored = self.config.get('mqtt') if isinstance(self.config, dict) else {}
+        return test_mqtt_connection(fields, stored=stored)
+
+    def mqtt_settings(self):
+        return mqtt_settings_payload(self.config)
+
+    def apply_mqtt_config(self, cmd):
+        self.apply_service_config({'mqtt': cmd})
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
         print(f"MQTT connected (rc={reason_code})", flush=True)
@@ -974,6 +1550,11 @@ class YoloSensor:
         cfg = cam["cfg"]
         files, bytes_ = self.buffer_stats(cam["id"])
         rtsp_out = None
+        usb_out = None
+        usb_controls_out = None
+        if cfg.get("type") == "usb":
+            usb_out = dict(cfg.get("usb", {}) or {})
+            usb_controls_out = dict(cfg.get("usb_controls", {}) or {})
         if cfg.get("type") == "rtsp":
             rtsp = dict(cfg.get("rtsp", {}) or {})
             rtsp_out = {k: v for k, v in rtsp.items() if k != "password"}
@@ -1002,6 +1583,8 @@ class YoloSensor:
             "heartbeat_interval": cfg.get("heartbeat_interval", 600),
             "camera_controls": cfg.get("camera_controls", {}),
             "rtsp": rtsp_out,
+            "usb": usb_out,
+            "usb_controls": usb_controls_out,
             # Pi Sensor card: display-only detected info (None for RTSP).
             "sensor_model": cam.get("sensor_model"),
             "camera_port": cam.get("camera_port"),
@@ -1077,10 +1660,12 @@ class YoloSensor:
         """Inference load: sum over cameras of
         (measured inference_time / sample_interval). Above 1.0 the
         worker cannot keep up; frames are superseded and per-camera
-        effective intervals grow. No hard camera limit; this is the
+        effective intervals grow. Paused cameras and cameras with no live backend are excluded. No hard camera limit; this is the
         limit signal (DESIGN.md §15.7)."""
         total = 0.0
         for cam in self.cameras:
+            if cam.get("paused") or cam.get("obj") is None:
+                continue
             secs = cam.get("last_inference_seconds")
             interval = cam["cfg"].get("sample_interval", 5.0) or 5.0
             if secs:
@@ -1122,30 +1707,124 @@ class YoloSensor:
         self.notify_stream({"type": "config"})
         print(f"model swap complete: {want}", flush=True)
 
+    def current_web_host(self):
+        web_cfg = self.config.get("web") \
+            if isinstance(self.config.get("web"), dict) else {}
+        return str(web_cfg.get("host") or DEFAULT_WEB_HOST)
+
+    def current_web_port(self):
+        if self.web_port:
+            try:
+                return int(self.web_port)
+            except (TypeError, ValueError):
+                pass
+        web_cfg = self.config.get("web") \
+            if isinstance(self.config.get("web"), dict) else {}
+        try:
+            return int(web_cfg.get("port", DEFAULT_WEB_PORT))
+        except (TypeError, ValueError):
+            return DEFAULT_WEB_PORT
+
+    def test_web_port(self, port):
+        """POST /api/web/test-port logic. The port this process is
+        already serving on always tests available: it is freed when
+        the service restarts onto it."""
+        port = validate_web_port(port)
+        if port == self.current_web_port():
+            return {"ok": True, "port": port, "available": True,
+                    "current": True}
+        host = self.current_web_host()
+        if web_port_available(host, port):
+            return {"ok": True, "port": port, "available": True,
+                    "current": False}
+        return {"ok": False, "port": port, "available": False,
+                "current": False,
+                "error": f"port {port} is not available on {host}"}
+
     def apply_service_config(self, cmd):
-        """Service-level config (model, buffer cap). Called for the
-        Settings modal's service-level fields and for
-        camera_id == 'service' API calls."""
+        # Service-level config: model, buffer cap, mqtt block, and/or
+        # portal port. One save for a combined call; MQTT switching
+        # happens after the save. Retained topics under an old
+        # topic_root are NOT cleared automatically (documented in
+        # README/DESIGN).
+        # Returns a dict: empty normally, or restarting/new_port/
+        # old_port when a port change schedules a service restart.
+        # A bad port raises ValueError BEFORE any mutation, so a
+        # failed port save persists nothing.
         if not isinstance(cmd, dict):
-            return
+            return {}
+        restart_info = None
+        if 'web_port' in cmd:
+            new_port = validate_web_port(cmd['web_port'])
+            old_port = self.current_web_port()
+            if new_port != old_port:
+                host = self.current_web_host()
+                if not web_port_available(host, new_port):
+                    raise ValueError(
+                        f"portal port {new_port} is not available "
+                        f"on {host}")
+                restart_info = {'old_port': old_port,
+                                'new_port': new_port}
         changed = False
-        if "model" in cmd:
-            want = {"n": "yolov8n", "s": "yolov8s"}.get(
-                cmd["model"], cmd["model"])
+        mqtt_switch = None
+        if 'model' in cmd:
+            want = {'n': 'yolov8n', 's': 'yolov8s'}.get(cmd['model'], cmd['model'])
             if want in MODELS and want != self.model_name:
                 self.pending_model = want
                 changed = True
             elif want not in MODELS:
-                print(f"service config: unknown model {cmd['model']!r}; "
-                      "want yolov8n/yolov8s", flush=True)
-        if "buffer_cap_mb" in cmd:
-            self.config["buffer"]["cap_bytes"] = (
-                int(cmd["buffer_cap_mb"]) * 1024 * 1024)
+                print('service config: unknown model ' + repr(cmd['model']) + '; want yolov8n/yolov8s', flush=True)
+        if 'buffer_cap_mb' in cmd:
+            self.config['buffer']['cap_bytes'] = int(cmd['buffer_cap_mb']) * 1024 * 1024
             changed = True
+        if 'mqtt' in cmd and isinstance(cmd['mqtt'], dict):
+            stored = self.config.get('mqtt') if isinstance(self.config.get('mqtt'), dict) else {}
+            new_mqtt = normalize_mqtt_block(cmd['mqtt'], stored=stored)
+            if new_mqtt != stored:
+                self.config['mqtt'] = new_mqtt
+                self.mqtt_configured = mqtt_is_configured(self.config)
+                self.root = str(new_mqtt.get('topic_root') or DEFAULT_TOPIC_ROOT).rstrip('/')
+                mqtt_switch = new_mqtt
+                changed = True
+        if 'web_port' in cmd:
+            # Legacy configs may have no web block: create it with
+            # defaults (host 0.0.0.0, current port) rather than crash.
+            web_cfg = self.config.setdefault('web', {})
+            if not isinstance(web_cfg, dict):
+                web_cfg = self.config['web'] = {}
+            before = dict(web_cfg)
+            web_cfg.setdefault('host', DEFAULT_WEB_HOST)
+            if restart_info is not None:
+                web_cfg['port'] = restart_info['new_port']
+                changed = True
+            else:
+                web_cfg.setdefault('port', old_port)
+            if web_cfg != before:
+                changed = True
         if changed:
             self.save_config()
-            self.publish_service_config()
-            self.notify_stream({"type": "config"})
+            if restart_info is not None:
+                # Restart AFTER the save response reaches the browser:
+                # the main loop honours this once the delay elapses.
+                self.restart_requested = {
+                    'old_port': restart_info['old_port'],
+                    'new_port': restart_info['new_port'],
+                    'at': time.monotonic() + 0.75}
+            if mqtt_switch is not None:
+                if self.mqtt_configured:
+                    self.mqtt_disconnect()
+                    self.start_mqtt_background()
+                else:
+                    self.mqtt_disconnect()
+                self.notify_stream({'type': 'config'})
+            else:
+                self.publish_service_config()
+                self.notify_stream({'type': 'config'})
+        if restart_info is not None:
+            return {'restarting': True,
+                    'old_port': restart_info['old_port'],
+                    'new_port': restart_info['new_port']}
+        return {}
 
 
     # ---- incoming commands ----
@@ -1199,7 +1878,8 @@ class YoloSensor:
                     cam["priority_next"] = True
                     result["ok"] = True
             elif kind == "service_config":
-                self.apply_service_config(cmd)
+                info = self.apply_service_config(cmd) or {}
+                result.update(info)
                 result["ok"] = True
             elif kind == "camera_add":
                 result["camera"] = self.add_camera(cmd)
@@ -1413,43 +2093,74 @@ class YoloSensor:
 
     # ---- camera lifecycle (DESIGN.md §15.3) ----
     def test_camera(self, body, camera_id=None):
-        """Connection test: grabs one frame, returns thumbnail +
-        resolution + codec. Persists NOTHING, never echoes/logs
-        credentials, never hangs (bounded by timeout_s). For an
-        existing camera the test serializes against the live capture
-        thread via the backend's stream lock."""
-        fields, rtsp = normalize_camera_form(body)
+        # Connection test: grabs one frame, returns thumbnail +
+        # resolution + codec. Persists NOTHING, never echoes/logs
+        # credentials, never hangs (bounded by timeout_s). USB tests
+        # return the same shape as RTSP tests.
         cam = self._find_cam(camera_id) if camera_id else None
         if camera_id and cam is None:
-            raise ValueError(f"unknown camera {camera_id}")
-        if cam is not None and cam["cfg"].get("type") != "rtsp":
-            raise ValueError("connection test only applies to RTSP cameras")
-        lock = None
-        if cam is not None and isinstance(cam.get("obj"), RTSPCamera):
-            lock = cam["obj"]._lock
+            raise ValueError('unknown camera ' + str(camera_id))
+        is_usb = False
         if cam is not None:
-            # Edit flow: an empty password keeps the stored one, so the
-            # test exercises the real credentials. Credentials-off
-            # clears them (normalize already blanked them).
-            stored = cam["cfg"].get("rtsp", {}) or {}
-            if fields["credentials_on"] and not fields["password_given"] \
-                    and stored.get("password"):
-                rtsp["password"] = stored["password"]
-                if not rtsp.get("username"):
-                    rtsp["username"] = stored.get("username", "")
+            is_usb = cam['cfg'].get('type') == 'usb'
+        elif isinstance(body, dict) and (body.get('type') == 'usb' or isinstance(body.get('usb'), dict)):
+            is_usb = True
+        if is_usb:
+            if cam is not None and isinstance(body, dict) and not isinstance(body.get('usb'), dict):
+                body = dict(body)
+                body['usb'] = dict(cam['cfg'].get('usb', {}) or {})
+                body['usb_controls'] = dict(cam['cfg'].get('usb_controls', {}) or {})
+                if 'name' not in body:
+                    body['name'] = cam['cfg'].get('name', cam['id'])
+            fields, usb, controls, resolution = normalize_usb_form(body)
+            if cam is not None:
+                stored_usb = dict(cam['cfg'].get('usb', {}) or {})
+                if usb == stored_usb and cam.get('slot') is not None:
+                    frame = cam['slot']
+                    h, w = frame.shape[:2]
+                    ok, buf = cv2.imencode('.jpg', self._downscale(frame, 320), [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if not ok:
+                        raise ValueError('usb connection test failed: thumbnail encode failed')
+                    return {'thumbnail_base64': base64.b64encode(buf.tobytes()).decode('ascii'), 'width': int(w), 'height': int(h), 'codec': stored_usb.get('pixel_format', 'MJPG'), 'grab_seconds': cam.get('last_grab_seconds') or 0, 'source': stored_usb.get('device_id', '')}
+                if isinstance(cam.get('obj'), USBCamera) and not cam.get('paused') and cam['obj']._cap is not None:
+                    try:
+                        frame, w, h, codec, secs, source = USBCamera.test_usb(usb)
+                    except RTSPTestError:
+                        raise ValueError('usb device is busy; pause the camera and test again')
+                else:
+                    try:
+                        frame, w, h, codec, secs, source = USBCamera.test_usb(usb)
+                    except RTSPTestError as e:
+                        raise ValueError('usb connection test failed: ' + str(e))
+            else:
+                try:
+                    frame, w, h, codec, secs, source = USBCamera.test_usb(usb)
+                except RTSPTestError as e:
+                    raise ValueError('usb connection test failed: ' + str(e))
+            ok, buf = cv2.imencode('.jpg', self._downscale(frame, 320), [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if not ok:
+                raise ValueError('usb connection test failed: thumbnail encode failed')
+            return {'thumbnail_base64': base64.b64encode(buf.tobytes()).decode('ascii'), 'width': int(w), 'height': int(h), 'codec': codec, 'grab_seconds': secs, 'source': source}
+        fields, rtsp = normalize_camera_form(body)
+        if cam is not None and cam['cfg'].get('type') != 'rtsp':
+            raise ValueError('connection test only applies to RTSP cameras')
+        lock = None
+        if cam is not None and isinstance(cam.get('obj'), RTSPCamera):
+            lock = cam['obj']._lock
+        if cam is not None:
+            stored = cam['cfg'].get('rtsp', {}) or {}
+            if fields['credentials_on'] and not fields['password_given'] and stored.get('password'):
+                rtsp['password'] = stored['password']
+                if not rtsp.get('username'):
+                    rtsp['username'] = stored.get('username', '')
         try:
-            frame, w, h, codec, secs, source = RTSPCamera.test_connection(
-                rtsp, stream_lock=lock)
+            frame, w, h, codec, secs, source = RTSPCamera.test_connection(rtsp, stream_lock=lock)
         except RTSPTestError as e:
-            raise ValueError(f"connection test failed: {e}")
-        ok, buf = cv2.imencode(".jpg", self._downscale(frame, 320),
-                               [cv2.IMWRITE_JPEG_QUALITY, 70])
+            raise ValueError('connection test failed: ' + str(e))
+        ok, buf = cv2.imencode('.jpg', self._downscale(frame, 320), [cv2.IMWRITE_JPEG_QUALITY, 70])
         if not ok:
-            raise ValueError("connection test failed: thumbnail encode failed")
-        return {"thumbnail_base64": base64.b64encode(
-                    buf.tobytes()).decode("ascii"),
-                "width": w, "height": h, "codec": codec,
-                "grab_seconds": secs, "source": source}
+            raise ValueError('connection test failed: thumbnail encode failed')
+        return {'thumbnail_base64': base64.b64encode(buf.tobytes()).decode('ascii'), 'width': w, 'height': h, 'codec': codec, 'grab_seconds': secs, 'source': source}
 
     @staticmethod
     def _downscale(frame, max_width):
@@ -1459,7 +2170,131 @@ class YoloSensor:
         scale = max_width / w
         return cv2.resize(frame, (max_width, max(1, int(h * scale))))
 
+    def usb_scan(self):
+        present = scan_usb_present()
+        by_device = {}
+        for c in self.config.get('cameras', []):
+            if c.get('type') == 'usb':
+                usb = c.get('usb', {}) or {}
+                by_device[usb.get('device_id', '')] = c
+        out = []
+        seen = set()
+        for d in present:
+            entry = {'device_id': d['device_id'], 'model': d['model'],
+                     'present': True, 'formats': d['formats']}
+            c = by_device.get(d['device_id'])
+            if c is not None:
+                entry['camera_id'] = c['id']
+                entry['camera_name'] = c.get('name', '')
+            else:
+                entry['camera_id'] = None
+                entry['camera_name'] = None
+            seen.add(d['device_id'])
+            out.append(entry)
+        for device_id, c in by_device.items():
+            if device_id in seen:
+                continue
+            usb = c.get('usb', {}) or {}
+            out.append({'device_id': device_id,
+                        'model': usb.get('model') or c.get('name', ''),
+                        'present': False, 'camera_id': c['id'],
+                        'camera_name': c.get('name', ''), 'formats': []})
+        return {'devices': out}
+
+    def _add_usb_camera(self, body):
+        fields, usb, controls, resolution = normalize_usb_form(body)
+        self._check_name_unique(fields['name'])
+        try:
+            frame, w, h, codec, secs, source = USBCamera.test_usb(usb)
+        except RTSPTestError as e:
+            raise ValueError('usb connection test failed: ' + str(e))
+        cam_id = 'camera' + str(self.config.get('next_camera_id', 0))
+        self.config['next_camera_id'] = self.config.get('next_camera_id', 0) + 1
+        ccfg = default_camera_cfg(cam_id, 'usb', fields['name'])
+        ccfg['icon'] = fields['icon']
+        ccfg['paused'] = fields['paused']
+        ccfg['rotate'] = fields['rotate']
+        ccfg['sample_interval'] = fields['sample_interval']
+        ccfg['resolution'] = [w, h]
+        present = {d['device_id']: d for d in scan_usb_present()}
+        if usb['device_id'] in present:
+            usb['model'] = present[usb['device_id']]['model']
+        ccfg['usb'] = usb
+        ccfg['usb_controls'] = controls
+        self.config.setdefault('cameras', []).append(ccfg)
+        self.save_config()
+        cam = self._make_runtime_cam(ccfg, USBCamera(ccfg))
+        self.cameras.append(cam)
+        det = {k: body[k] for k in ('confidence_threshold', 'imgsz',
+                                    'heartbeat_interval', 'publish',
+                                    'watchlist', 'disappear_confirm_cycles') if k in body}
+        if det:
+            self.apply_config_command(cam, det)
+        self.start_capture_thread(cam)
+        self.publish_service_config()
+        self.publish_camera_config(cam)
+        self.publish_cam(cam, 'status', {'status': cam['status'], 'timestamp': utcnow_iso()}, retain=True)
+        self.notify_stream({'type': 'config', 'camera_id': cam_id})
+        print('[' + cam_id + '] usb camera added (' + fields['name'] + ', ' + str(w) + 'x' + str(h) + ' ' + codec + ')', flush=True)
+        return self.camera_config_payload(cam)
+
+    def _edit_usb_camera(self, cam, body):
+        cam_id = cam['id']
+        fields, usb, controls, resolution = normalize_usb_form(body)
+        self._check_name_unique(fields['name'], exclude_id=cam_id)
+        ccfg = cam['cfg']
+        stored_usb = dict(ccfg.get('usb', {}) or {})
+        stored_controls = dict(ccfg.get('usb_controls', {}) or {})
+        stored_res = list(ccfg.get('resolution', [1280, 720]))
+        connection_changed = (usb != stored_usb or controls != stored_controls or resolution != stored_res)
+        if connection_changed:
+            live = isinstance(cam.get('obj'), USBCamera) and not cam.get('paused') and cam['obj']._cap is not None
+            if live:
+                self.stop_capture_thread(cam)
+                try:
+                    cam['obj'].close()
+                except Exception:
+                    pass
+                try:
+                    USBCamera.test_usb(usb)
+                except RTSPTestError as e:
+                    self._restart_capture_thread(cam)
+                    raise ValueError('usb connection test failed: ' + str(e))
+            else:
+                try:
+                    USBCamera.test_usb(usb)
+                except RTSPTestError as e:
+                    raise ValueError('usb connection test failed: ' + str(e))
+        paused_changed = (fields['paused'] != bool(ccfg.get('paused', False)))
+        ccfg['name'] = fields['name']
+        ccfg['icon'] = fields['icon']
+        ccfg['rotate'] = fields['rotate']
+        ccfg['sample_interval'] = fields['sample_interval']
+        ccfg['usb'] = usb
+        ccfg['usb_controls'] = controls
+        ccfg['resolution'] = resolution
+        det = {k: body[k] for k in ('confidence_threshold', 'imgsz',
+                                    'heartbeat_interval', 'publish',
+                                    'watchlist', 'disappear_confirm_cycles') if k in body}
+        if det:
+            self.apply_config_command(cam, det)
+        if connection_changed:
+            print('[' + cam_id + '] usb connection changed; restarting capture thread', flush=True)
+            self._restart_capture_thread(cam)
+        if paused_changed:
+            if fields['paused']:
+                self._apply_pause(cam)
+            else:
+                self._apply_resume(cam)
+        self.save_config()
+        self.publish_camera_config(cam)
+        self.notify_stream({'type': 'config', 'camera_id': cam_id})
+        print('[' + cam_id + '] usb camera edited', flush=True)
+        return self.camera_config_payload(cam)
+
     def add_camera(self, body):
+        if isinstance(body, dict) and body.get('type') == 'usb':
+            return self._add_usb_camera(body)
         """Add an RTSP camera. Runs the connection test BEFORE
         persisting; a failed test adds nothing. IDs come from the
         monotonic next_camera_id counter and are never reused."""
@@ -1510,6 +2345,8 @@ class YoloSensor:
             raise ValueError(f"unknown camera {cam_id}")
         if cam["cfg"].get("type") == "picamera":
             return self._edit_picamera(cam, body)
+        if cam['cfg'].get('type') == 'usb':
+            return self._edit_usb_camera(cam, body)
         fields, rtsp = normalize_camera_form(body)
         self._check_name_unique(fields["name"], exclude_id=cam_id)
         ccfg = cam["cfg"]
@@ -1594,7 +2431,7 @@ class YoloSensor:
         the camera for other apps). Status paused; counts freeze."""
         cam["cfg"]["paused"] = True
         cam["paused"] = True
-        if isinstance(cam.get("obj"), RTSPCamera):
+        if isinstance(cam.get("obj"), (RTSPCamera, USBCamera)):
             cam["obj"].close()
         self.set_cam_status(cam, "paused")
         self.save_config()
@@ -1909,6 +2746,8 @@ class YoloSensor:
         status = "paused" if ccfg.get("paused") else "online"
         if obj is None:
             status = "offline"
+        if ccfg.get('type') == 'usb' and resolve_usb_node((ccfg.get('usb', {}) or {}).get('device_id', '')) is None:
+            status = 'offline'
         # Pi Sensor card: display-only detected info. Picamera2() with
         # no args opens camera_num 0 by construction, i.e. CSI 0.
         if ccfg.get("type") == "picamera" and obj is not None:
@@ -2192,10 +3031,12 @@ class YoloSensor:
         changes = migrate_config(self.config)
         if changes:
             self.save_config()
-        self.root = self.config["mqtt"]["topic_root"].rstrip("/")
+        self.mqtt_configured = mqtt_is_configured(self.config)
+        _m = self.config.get('mqtt') if isinstance(self.config.get('mqtt'), dict) else {}
+        self.root = str(_m.get('topic_root') or DEFAULT_TOPIC_ROOT).rstrip('/')
         self.setup_cameras()
         self.start_web()
-        self.mqtt_connect()
+        self.start_mqtt_background()
         signal.signal(signal.SIGTERM, self.handle_signal)
         signal.signal(signal.SIGINT, self.handle_signal)
         self.inference_thread = threading.Thread(
@@ -2206,6 +3047,37 @@ class YoloSensor:
               flush=True)
         while not self.stop_flag:
             self.drain_messages()
+            if self.restart_requested is not None and \
+                    time.monotonic() >= self.restart_requested["at"]:
+                req = self.restart_requested
+                self.restart_requested = None
+                host = self.current_web_host()
+                if not web_port_available(host, req["new_port"]):
+                    # Port grabbed since the save: abort, revert the
+                    # saved port, stay on the old port. Clients poll
+                    # the new port, then fall back to the old one.
+                    web_cfg = self.config.setdefault("web", {})
+                    if not isinstance(web_cfg, dict):
+                        web_cfg = self.config["web"] = {}
+                    web_cfg["port"] = req["old_port"]
+                    self.save_config()
+                    print(f"portal-port restart aborted: port "
+                          f"{req['new_port']} became unavailable; "
+                          f"kept port {req['old_port']}", flush=True)
+                    self.notify_stream({"type": "restart_aborted",
+                                        "old_port": req["old_port"],
+                                        "new_port": req["new_port"]})
+                else:
+                    # Every open tab moves: broadcast first, give SSE
+                    # a beat to flush, then exit the loop so
+                    # shutdown() runs before the exec in main().
+                    self.notify_stream({"type": "restart",
+                                        "new_port": req["new_port"]})
+                    time.sleep(0.5)
+                    self.restart_exec = True
+                    self.stop_flag = True
+                    self._stop_evt.set()
+                    break
             self.watchdog_step()
             now = time.time()
             for cam in list(self.cameras):
@@ -2227,12 +3099,39 @@ def load_config():
         return json.load(f)
 
 
+def load_or_create_config():
+    if os.path.exists(CONFIG_PATH):
+        return load_config()
+    cfg = default_config()
+    tmp = CONFIG_PATH + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG_PATH)
+    print('created default config at ' + CONFIG_PATH + ' (MQTT disabled; add cameras via the web UI)', flush=True)
+    return cfg
+
+
 def main():
-    if not os.path.exists(CONFIG_PATH):
-        print(f"missing {CONFIG_PATH}: copy config.json.example and run "
-              f"setup_config.py", file=sys.stderr)
-        sys.exit(1)
-    YoloSensor(load_config()).run()
+    sensor = YoloSensor(load_or_create_config())
+    sensor.run()
+    if getattr(sensor, "restart_exec", False):
+        # Full-service restart on the new portal port: exec a fresh
+        # process so the whole saved config is re-read (detection and
+        # MQTT behaviour on restart are identical to a manual one:
+        # MQTT offline then online, cameras reopened). Never restart
+        # only the web thread as a shortcut.
+        print("restarting on the new portal port (full service "
+              "restart; config re-read)", flush=True)
+        try:
+            os.execv(sys.executable,
+                     [sys.executable, os.path.abspath(__file__)])
+        except Exception as e:
+            print(f"portal-port restart exec failed ({e}); service "
+                  f"stopped - restart manually from "
+                  f"~/projects/jaeger with: "
+                  f"venv/bin/python -u yolo_sensor.py", flush=True)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
