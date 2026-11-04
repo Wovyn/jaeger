@@ -9,27 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README rewritten as a third-party install guide: project overview and feature list first, explicit step-by-step installation (including the systemd unit edits a new installer must make), camera setup per type, and the reference-install specifics moved into labelled examples/notes; the Web UI guide section was also restructured with subheadings for readability; a second readability pass split the remaining dense sections (How it works, camera setup, MQTT detection detail, config.json layout, performance) into shorter paragraphs and lists.
 - Added AGENTS.md: a self-contained installation contract for AI-agent installers (ordered steps, per-step verification, done criteria); README's Installation section now points agents at it.
 - Repository renamed Wovyn/muse-pi-yolo-mqtt -> Wovyn/jaeger (Oct 24, 2026, in place on GitHub); local folder now ~/projects/jaeger, MQTT service identity now "jaeger", docs and service paths updated. No version change; MQTT topic tree unchanged (already Jaeger).
-- Web UI: compact camera modal (Oct 25, 2026). The RTSP and Pi modals
-  are now one shared modal driven by a camera-type registry
-  (`CAM_TYPES` in static/app.js), so a new camera type adds an entry
-  and its own tab panels instead of a third copy of the modal. Four
-  tabs per type: RTSP Connection | Capture, Pi Camera | Exposure, then
-  the shared Detection and Watchlist (the watchlist moved to its own
-  full-width tab, with the selected count on the tab). Name and icon
-  moved into the header (icon is a pop-over picker); long hints became
-  "i" tips; the modal has a fixed height (min(90vh, 640px)) with only
-  the tab body scrolling, so it no longer scrolls on a 1366x768 screen
-  (was 819-930px tall). Test connection / Test capture results show as
-  a status pill in the footer (thumbnail opens full size) instead of a
-  block that grew the modal.
-- Web UI: [+] opens an Add camera chooser: "Found on this device"
-  (types with discovery; today the Pi camera, shown as added or with a
-  Retry detection action that replaces the Rescan for Pi camera button)
-  and "Add manually" (Network camera (RTSP)).
-- Fix: editing a camera no longer resets "Confirm absent"
-  (disappear_confirm_cycles) to 4; the stored value is now loaded.
-- Fix: Pi Test capture now reports its result (it read the
-  /api/cameras response as a list and stopped at "Capturing...").
 
 ## [0.4.0] - 2026-10-25
 
@@ -50,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First-paint loading placeholders: the Latest Frame panel shows "Loading latest frame…" until the first frame arrives (then the frame; "No frame available" if the fetch fails, "No camera selected" with no selection), and the Cameras panel shows "Loading cameras…" until the first /api/cameras response ("Could not load cameras." if it fails). Placeholders are transition-only — first load and camera switches — and SSE updates never bring them back.
 - Camera-row pause tooltips now say what pausing disconnects, per camera type: RTSP "Pause this camera (disconnects the RTSP stream)", USB "Pause this camera (disconnects the USB camera)", Pi Camera the plain "Pause this camera". The General panel port field is labelled "Portal Port" (the MQTT broker Port label is unchanged).
 ### Fixed
+- Editing a camera no longer resets "Confirm absent"
+  (disappear_confirm_cycles) to 4; the stored value is now loaded.
+- Pi Test capture now reports its result (it read the
+  /api/cameras response as a list and stopped at "Capturing...").
 - Saturation (inference load) no longer counts paused cameras or cameras with no live backend: saturation() previously summed last_inference_seconds over all cameras and pausing never cleared the stored value, so a paused camera kept contributing its last inference time forever and pausing changed the displayed load not at all. The API still reports the paused camera's last inference time with its old timestamp; only the saturation sum excludes it.
 - RTSP camera test in the compact modal now maps the actual server test response (width/height/thumbnail_base64); the branch code expected resolution/jpeg_base64, which the server never returns, so the pill showed no resolution and no thumbnail.
 - Events list, event modal caption, and counts header now show the camera name instead of the camera id: `GET /api/events` returns `camera_name` (resolved from the current camera config, falling back to the id for a deleted/unknown camera) for both sidecar-backed and pre-v0.2.0 JPG-only entries, and the web UI prefers it (falling back to its local camera-name lookup).
